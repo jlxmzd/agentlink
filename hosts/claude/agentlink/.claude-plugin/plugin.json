@@ -1,0 +1,9 @@
+{
+  "name": "agentlink",
+  "version": "1.0.0",
+  "description": "Claude side of AgentLink: /agentlink command, change-only prompt context and self-wake for the bound conversation",
+  "author": {
+    "name": "AgentLink"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="agentlink-token" content="__AGENTLINK_TOKEN__">
+<title>AgentLink 管理面板</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="logo" aria-hidden="true">⟁</span> AgentLink <small>Claude Code · Codex · DeepSeek</small></div>
+  <div id="hostbar" class="hostbar" aria-live="polite"></div>
+</header>
+<div class="layout">
+  <nav class="side" aria-label="项目">
+    <h2>项目</h2>
+    <ul id="projects" class="projects"></ul>
+    <form id="add-project" class="add">
+      <label for="add-root">添加项目目录</label>
+      <input id="add-root" placeholder="例如 C:\Projects\MyProject" autocomplete="off" required>
+      <button type="submit">添加</button>
+    </form>
+  </nav>
+  <main id="main">
+    <section id="empty" class="empty">
+      <h1>选择或添加一个项目</h1>
+      <p>在左侧填写项目目录，然后为 Claude Code、Codex、DeepSeek 各选一个对话绑定。确认后会在项目目录生成 AGENTLINK.md 协作约定，并在 AGENTS.md / CLAUDE.md 写入托管段落。</p>
+    </section>
+    <section id="project" hidden>
+      <div class="phead">
+        <div>
+          <h1 id="pname"></h1>
+          <div id="proot" class="muted mono"></div>
+        </div>
+        <div class="tabs" role="tablist">
+          <button role="tab" data-tab="bind" aria-selected="true">绑定</button>
+          <button role="tab" data-tab="tasks" aria-selected="false">任务</button>
+          <button role="tab" data-tab="hosts" aria-selected="false">宿主插件</button>
+          <button role="tab" data-tab="settings" aria-selected="false">设置 / 迁移</button>
+        </div>
+      </div>
+
+      <div id="tab-bind" class="tab">
+        <div class="toolbar">
+          <label class="check"><input type="checkbox" id="show-all"> 显示所有目录的对话</label>
+          <button id="refresh-sessions" type="button" class="ghost">刷新对话</button>
+          <button id="apply" type="button" class="primary">确认绑定并生成协作文件</button>
+          <span id="apply-result" class="muted" aria-live="polite"></span>
+        </div>
+        <p class="muted fine">四张卡片：Codex、Claude Code、DeepSeek 执行、DeepSeek 验收。会话列表默认收起，点「选择对话」后可搜索；绑定在「确认绑定」里统一保存。</p>
+        <div id="agents" class="agents"></div>
+        <details class="options-box">
+          <summary>协作设置：项目名称、总控、集成人、协作文件开关</summary>
+          <fieldset class="options">
+            <label>项目名称 <input id="opt-name"></label>
+            <label>总控（掌握大局、设计与路由）
+              <select id="opt-lead">
+                <option value="codex">Codex</option>
+                <option value="claude">Claude Code</option>
+              </select>
+            </label>
+            <label>集成人（构建、审计、提交）
+              <select id="opt-integrator">
+                <option value="codex">Codex</option>
+                <option value="claude">Claude Code</option>
+                <option value="deepseek">DeepSeek</option>
+              </select>
+            </label>
+            <label class="check"><input type="checkbox" id="opt-agentsMd"> 写入 AGENTS.md 托管段（Codex / DeepSeek 读取）</label>
+            <label class="check"><input type="checkbox" id="opt-claudeMd"> 写入 CLAUDE.md 托管段（Claude 读取）</label>
+            <label class="check"><input type="checkbox" id="opt-gitignore"> 在 .gitignore 忽略 .agentlink/bus/</label>
+            <label class="check"><input type="checkbox" id="opt-autoEscalate"> DeepSeek 返工两次未解决时自动转交整改（代码问题 → Claude，设计问题 → Codex）</label>
+          </fieldset>
+        </details>
+      </div>
+
+      <div id="tab-tasks" class="tab" hidden>
+        <form id="post" class="post">
+          <h2>发出任务（发起方：你）</h2>
+          <div class="row">
+            <label>交给
+              <select name="to"><option value="deepseek">DeepSeek</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select>
+            </label>
+            <label>级别
+              <select name="level"><option>L0</option><option selected>L1</option><option>L2</option><option>L3</option></select>
+            </label>
+            <label class="grow">标题 <input name="title" required maxlength="120"></label>
+          </div>
+          <label>允许路径（项目相对路径，空格或换行分隔）<input name="paths" class="mono"></label>
+          <label>规格 <textarea name="spec" rows="5" required></textarea></label>
+          <label>验收命令（每行一条，在项目根目录执行；交付时由程序运行，失败直接退回执行方；DeepSeek 的 L0/L1 通过即自动验收）<textarea name="checks" rows="2" class="mono"></textarea></label>
+          <label>实现指引（交给 DeepSeek 的 L2/L3 任务建议填写：大致方向、推荐写法、必须保持的接口、风险点）<textarea name="guide" rows="3"></textarea></label>
+          <div class="row">
+            <label class="check"><input type="checkbox" name="build"> 持有构建锁</label>
+            <label class="check"><input type="checkbox" name="hold"> DeepSeek 任务先不投递</label>
+            <button type="submit" class="primary">发出</button>
+            <span id="post-result" class="muted" aria-live="polite"></span>
+          </div>
+        </form>
+        <div class="toolbar">
+          <label class="check"><input type="checkbox" id="wake"> 自动唤醒</label>
+          <label class="check"><input type="checkbox" id="show-done"> 显示已结束</label>
+          <span id="wake-info" class="muted"></span>
+        </div>
+        <div id="board" class="board"></div>
+        <h2>最近事件</h2>
+        <ol id="events" class="events mono"></ol>
+      </div>
+
+      <div id="tab-hosts" class="tab" hidden>
+        <p class="muted">宿主插件全局安装一次即可，对所有已绑定的项目生效；只有绑定的对话会收到任务提示和自动唤醒。改动前会备份配置文件，装完需在各宿主空闲时重启。</p>
+        <div id="hosts" class="hosts"></div>
+        <div class="confirm">
+          <button id="install" type="button" class="primary">安装所选</button>
+          <button id="uninstall" type="button" class="ghost">卸载所选</button>
+        </div>
+        <pre id="install-report" class="report" aria-live="polite"></pre>
+      </div>
+
+      <div id="tab-settings" class="tab" hidden>
+        <fieldset class="options">
+          <legend>程序自动验收</legend>
+          <label class="check"><input type="checkbox" id="opt-autoAccept-L0"> L0 机械任务：程序验收通过即自动验收</label>
+          <label class="check"><input type="checkbox" id="opt-autoAccept-L1"> L1 规格明确任务：程序验收通过即自动验收</label>
+          <div class="toolbar">
+            <button id="save-settings" type="button" class="primary">保存设置</button>
+            <span id="settings-result" class="muted" aria-live="polite"></span>
+          </div>
+          <p class="note">AI 验收对话在「绑定」页的「DeepSeek 验收」卡片里选择，并与该项目的绑定一起保存；这里只调整程序自动验收级别。AI 审查开启时，L1 及以上交给 DeepSeek 的实现任务先经过 AI 审查，不再直接自动验收。</p>
+        </fieldset>
+        <fieldset class="options">
+          <legend>设置迁移</legend>
+          <label class="check"><input type="checkbox" id="migrate-sessions" checked> 导出时包含会话元数据（会话 ID 与标题；换机器后需要重新绑定）</label>
+          <div class="toolbar">
+            <button id="export-migration" type="button" class="primary">导出迁移包</button>
+            <label class="ghost file">导入迁移包<input type="file" id="import-migration" accept=".json,application/json" hidden></label>
+            <span id="migration-result" class="muted" aria-live="polite"></span>
+          </div>
+          <pre id="migration-report" class="report" aria-live="polite"></pre>
+          <p class="note">迁移包只含项目名称、分工、选项、协作文件开关和可选的会话元数据；不含任务正文、回执、事件、本机路径或凭据。导入保留当前项目目录与任务总线，未知字段忽略，本机看不到的会话会标记为待重新绑定。</p>
+        </fieldset>
+      </div>
+    </section>
+  </main>
+</div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
