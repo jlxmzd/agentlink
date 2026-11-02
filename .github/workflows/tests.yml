@@ -5,18 +5,29 @@ permissions:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ['3.8', '3.12']
+        include:
+          # Python 3.8 has no build for Ubuntu 26.04; retain minimum-version coverage here.
+          - os: ubuntu-22.04
+            python: '3.8'
+          - os: windows-2022
+            python: '3.8'
+          - os: ubuntu-24.04
+            python: '3.12'
+          - os: windows-2022
+            python: '3.12'
+          - os: macos-15
+            python: '3.12'
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
       - run: python -I tests/test_agentlink.py
       - run: python -I tests/test_harness.py
       - run: node --check agentlink/web/app.js
