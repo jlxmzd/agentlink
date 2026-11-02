@@ -89,9 +89,6 @@ python -I tests/test_harness.py
 
 使用临时家目录和临时项目，不读写真实配置，不投递、不唤醒；Harness 侧用假客户端覆盖投递与 AI 审查流程。
 
-## 从 MLUQOMS tri 迁移
-
-旧插件（tri-collab、mluqoms-tri、tri-collaboration-bridge）与本工具会同时运行、重复唤醒 Codex。确认 AgentLink 工作后，在 MLUQOMS 执行 `python scripts/tri/install.py --uninstall --claude --codex --harness`。旧的 `.artifacts/tri` 任务不会自动迁移。
 
 ## 贡献与安全
 
