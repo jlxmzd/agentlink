@@ -296,7 +296,7 @@ class Bus:
                 t['aiReview'] = {'status': 'pending', 'attempt': attempt, 'session': self.ai_review_session(),
                                  'requestId': self.ai_review_request(task_id, attempt, generation),
                                  'generation': generation,
-                                 'token': secrets.token_urlsafe(18), 'at': now(),
+                                 'token': 'review_' + secrets.token_urlsafe(18), 'at': now(),
                                  'attempts': 0, 'nextRetryAt': None, 'startedAt': None,
                                  'sentAt': None, 'lease': None, 'leaseId': None}
                 self.emit(t, 'agentlink', 'ai_review', '程序验收通过，等待 DeepSeek AI 验收')
@@ -609,7 +609,7 @@ class Bus:
         elif checks: verified = '验收命令未通过：%s' % checks.get('failed')
         else: verified = '任务未设验收命令'
         token, attempt, cmd = review['token'], review['attempt'], cli()
-        common = '%s reviewer --as deepseek --task %s --attempt %d --token %s' % (cmd, t['id'], attempt, token)
+        common = '%s reviewer --as deepseek --task %s --attempt %d --token=%s' % (cmd, t['id'], attempt, token)
         return ('AgentLink AI 验收：任务 %s（%s→%s %s，第 %d 次交付）。你只负责审查，不要修改任何文件、也不要运行会'
                 '改动文件的命令。\n允许路径：%s\n程序验收：%s\n改动文件：%s\n\n--- 规格 ---\n%s\n\n'
                 '第一步（必须先做）：`%s --verdict started` —— 确认你已开始审查；没有这一步，系统会认为提示只是入队了，'
@@ -864,7 +864,7 @@ class Bus:
         """Called under the task lock: no new owner is allowed until the old one acknowledges."""
         t['recallGeneration'] = t.get('recallGeneration', 0) + 1
         t['recall'] = {'status': 'pending', 'from': t['to'], 'to': to, 'requestedBy': agent,
-                       'at': now(), 'note': note[:600], 'token': secrets.token_urlsafe(18),
+                       'at': now(), 'note': note[:600], 'token': 'recall_' + secrets.token_urlsafe(18),
                        'generation': t['recallGeneration'], 'notification': 'pending', 'intent': intent}
         t['state'] = 'recalling'
         self.emit(t, agent, 'recall', note or '请求原执行方停止并确认；原文件锁保留')
@@ -1008,7 +1008,7 @@ class Bus:
         r = t['recall']
         target = '终止任务' if r.get('intent') == 'cancel' else '交给 ' + r['to']
         return ('AgentLink 回收请求 %s：总控/发起方要求停止本任务并%s。停止编辑允许路径，'
-                '等待你为本任务启动的工具及子智能体全部停止后，执行 %s --as %s stop-ack %s --token %s '
+                '等待你为本任务启动的工具及子智能体全部停止后，执行 %s --as %s stop-ack %s --token=%s '
                 '--note "已停止本任务全部写入、工具及子智能体"。未确认前任务锁仍归你；不要继续实现或交付。'
                 '如不能保证停止，不要确认，说明原因。') % (t['id'], target, cli(), r['from'], t['id'], r['token'])
 

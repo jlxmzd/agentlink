@@ -290,8 +290,10 @@ class TaskControls(unittest.TestCase):
         from agentlink.cli import main
         tid = self.task('codex', 'claude')
         self.bus.claim('claude', tid)
-        self.bus.reassign('codex', tid, 'codex', no_dispatch=True)
+        with patch.object(B.secrets, 'token_urlsafe', return_value='-leading-hyphen'):
+            self.bus.reassign('codex', tid, 'codex', no_dispatch=True)
         first = self.bus.load(tid)['recall']['token']
+        self.assertEqual(first, 'recall_-leading-hyphen')
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(main(['--project', str(self.p.root), '--as', 'claude', 'stop-ack', tid,
                                    '--token', first, '--note', 'tools and writes stopped', '--no-dispatch']), 0)
@@ -304,6 +306,32 @@ class TaskControls(unittest.TestCase):
         self.assertIn(tid, self.bus.locks())
         self.bus.acknowledge_stop('codex', tid, second, 'all stopped', no_dispatch=True)
         self.assertEqual((self.bus.load(tid)['state'], self.bus.load(tid)['to']), ('posted', 'claude'))
+
+    def test_legacy_hyphen_tokens_in_generated_receipt_commands(self):
+        import contextlib
+        import io
+        from agentlink.cli import main
+        tid = self.task('codex', 'claude')
+        self.bus.claim('claude', tid)
+        self.bus.reassign('codex', tid, 'codex', no_dispatch=True)
+        task = self.bus.load(tid)
+        task['recall']['token'] = '-legacy-recall-token'
+        self.bus.save(task)
+        prompt = self.bus.recall_prompt(task)
+        self.assertIn('--token=-legacy-recall-token', prompt)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['--project', str(self.p.root), '--as', 'claude', 'stop-ack', tid,
+                                   '--token=-legacy-recall-token', '--note', 'stopped', '--no-dispatch']), 0)
+        task = self.bus.load(tid)
+        task.update(state='ai_review', aiReview={'attempt':0, 'token':'-legacy-review-token', 'status':'sent'})
+        self.bus.save(task)
+        prompt = self.bus.ai_review_prompt(task, task['aiReview'])
+        self.assertIn('--token=-legacy-review-token', prompt)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['--project', str(self.p.root), '--as', 'deepseek', 'reviewer',
+                                   '--task', tid, '--attempt', '0', '--verdict', 'started',
+                                   '--token=-legacy-review-token']), 0)
+        self.assertEqual(self.bus.load(tid)['aiReview']['status'], 'started')
 
     def test_wait_timeout_preserves_real_state_including_review_and_recall(self):
         tid = self.task('codex', 'claude')
