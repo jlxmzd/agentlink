@@ -112,8 +112,13 @@ def run(a):
     if a.cmd == 'deliver': return bus.deliver(a.agent, a.id, a.summary, a.checks, a.evidence, a.limits)
     if a.cmd in ('accept', 'reject', 'cancel'):
         return bus.review(a.agent, a.id, a.cmd, a.note, getattr(a, 'no_dispatch', False), getattr(a, 'kind', 'code'))
-    if a.cmd == 'block': return bus.block(a.agent, a.id, a.note)
+    if a.cmd == 'block':
+        return bus.block(a.agent, a.id, a.note, a.missing, a.attempts, a.help_needed, a.evidence)
+    if a.cmd == 'unblock': return bus.unblock(a.agent, a.id, a.note, a.no_dispatch)
+    if a.cmd in ('pause', 'resume'): return bus.control(a.agent, a.id, a.cmd, a.note)
+    if a.cmd in ('takeover', 'remind'): return bus.review_attention(a.agent, a.id, a.cmd, a.note)
     if a.cmd == 'reassign': return bus.reassign(a.agent, a.id, a.to, a.note, a.no_dispatch)
+    if a.cmd == 'stop-ack': return bus.acknowledge_stop(a.agent, a.id, a.token, a.note, a.no_dispatch)
     if a.cmd == 'show': return bus.show(a.id, a.full)
     if a.cmd == 'list': return bus.listing(a.agent, a.all, a.full)
     if a.cmd == 'locks': return bus.locks()
@@ -122,6 +127,7 @@ def run(a):
     if a.cmd == 'pump':
         bus.pump(); bus.heartbeat(codexWake=bus.wake_all()); return None
     if a.cmd == 'pending': return bus.pending(a.agent, a.session, a.claim)
+    if a.cmd == 'ack-wake': return bus.ack_wake(a.agent, a.lease, not a.failed)
     if a.cmd == 'reviewer':
         return bus.ai_review(a.agent, a.task, a.attempt, a.token, a.verdict, a.note, a.kind, a.no_dispatch)
     if a.cmd == 'wake':
@@ -161,8 +167,14 @@ def parser():
     add('accept', ident, (['--note'], {'default': ''}))
     add('reject', ident, (['--note'], {'required': True}), (['--kind'], {'choices': ('code', 'design'), 'default': 'code'}), nodisp)
     add('cancel', ident, (['--note'], {'default': ''}))
-    add('block', ident, (['--note'], {'required': True}))
+    for action in ('pause', 'resume', 'takeover', 'remind'):
+        add(action, ident, (['--note'], {'default': ''}))
+    add('block', ident, (['--note'], {'required': True}), (['--missing'], {'default': ''}),
+        (['--attempts'], {'default': ''}), (['--help-needed'], {'default': ''}),
+        (['--evidence'], {'nargs': '*', 'default': []}))
+    add('unblock', ident, (['--note'], {'required': True}), nodisp)
     add('reassign', ident, (['--to'], {'choices': ACTORS, 'required': True}), (['--note'], {'default': ''}), nodisp)
+    add('stop-ack', ident, (['--token'], {'required': True}), (['--note'], {'required': True}), nodisp)
     add('show', ident, (['--full'], {'action': 'store_true'}))
     add('list', (['--all'], {'action': 'store_true'}),
         (['--full'], {'action': 'store_true', 'help': 'also show level and direction (longer output)'}))
@@ -174,8 +186,12 @@ def parser():
     add('pump')
     add('pump-all')
     add('pending', (['--claim'], {'action': 'store_true'}), (['--session'], {'default': None}))
+    # 预留唤醒之后由真正开始的那一轮结束它；失败也走这里，计入冷却而不是假装成功。
+    add('ack-wake', (['--lease'], {'required': True}), (['--failed'], {'action': 'store_true'}))
     add('reviewer', (['--task'], {'required': True}), (['--attempt'], {'type': int, 'required': True}),
-        (['--token'], {'required': True}), (['--verdict'], {'choices': ('accept', 'reject'), 'required': True}),
+        (['--token'], {'required': True}),
+        (['--verdict'], {'choices': ('started', 'accept', 'reject'), 'required': True,
+                         'help': 'started = reviewer began; accept/reject = the verdict after it began'}),
         (['--note'], {'default': ''}), (['--kind'], {'choices': ('code', 'design'), 'default': 'code'}), nodisp)
     add('wake', (['mode'], {'nargs': '?', 'choices': ['on', 'off', 'status'], 'default': 'status'}))
     add('projects')
@@ -185,7 +201,8 @@ def parser():
 
 
 ANONYMOUS = {'list', 'locks', 'show', 'wait', 'pump', 'pump-all', 'wake', 'projects', 'sessions', 'panel', 'dispatch'}
-MUTATING = {'post', 'deliver', 'accept', 'reject', 'cancel', 'block', 'reassign', 'reviewer'}
+MUTATING = {'post', 'deliver', 'accept', 'reject', 'cancel', 'block', 'unblock', 'reassign', 'reviewer',
+            'pause', 'resume', 'takeover', 'remind', 'stop-ack'}
 
 
 def log_hook_error(agent, error):
@@ -207,6 +224,10 @@ def main(argv=None):
             result = {'ids': [], 'wake': False} if args.cmd == 'pending' else None
     else:
         result = run(args)
+        if args.agent == 'deepseek' and args.cmd in MUTATING and isinstance(result, dict):
+            bus = resolve(args).bus()
+            rules = bus.rules_block('deepseek', 'CommandResult', bus.read_seat('deepseek'), True)
+            if rules: result['rulesReminder'] = rules
         if args.cmd in MUTATING:
             try: resolve(args).bus().wake_all()          # wake the other side now, not at the next watcher tick
             except Exception: pass

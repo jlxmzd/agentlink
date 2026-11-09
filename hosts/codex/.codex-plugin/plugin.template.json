@@ -1,36 +1,17 @@
 {
   "name": "agentlink",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Codex side of AgentLink: change-only context hooks for the bound thread and the agentlink skill.",
-  "author": {
-    "name": "AgentLink"
-  },
+  "author": { "name": "AgentLink" },
   "license": "Apache-2.0",
   "skills": "./skills/",
   "hooks": {
     "hooks": {
       "SessionStart": [
-        {
-          "hooks": [
-            {
-              "type": "command",
-              "command": "",
-              "timeoutSec": 20,
-              "statusMessage": "AgentLink: 读取三方任务"
-            }
-          ]
-        }
+        { "hooks": [ { "type": "command", "command": "", "timeoutSec": 20, "statusMessage": "AgentLink: 读取三方任务" } ] }
       ],
       "UserPromptSubmit": [
-        {
-          "hooks": [
-            {
-              "type": "command",
-              "command": "",
-              "timeoutSec": 20
-            }
-          ]
-        }
+        { "hooks": [ { "type": "command", "command": "", "timeoutSec": 20 } ] }
       ]
     }
   },
@@ -38,9 +19,6 @@
     "displayName": "AgentLink",
     "shortDescription": "Claude · Codex · DeepSeek task bus",
     "category": "Developer Tools",
-    "capabilities": [
-      "Read",
-      "Write"
-    ]
+    "capabilities": ["Read", "Write"]
   }
 }

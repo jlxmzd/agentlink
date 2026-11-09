@@ -6,11 +6,18 @@
 <meta name="agentlink-token" content="__AGENTLINK_TOKEN__">
 <title>AgentLink 管理面板</title>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/flow.css">
 </head>
 <body>
 <header class="top">
-  <div class="brand"><span class="logo" aria-hidden="true">⟁</span> AgentLink <small>Claude Code · Codex · DeepSeek</small></div>
-  <div id="hostbar" class="hostbar" aria-live="polite"></div>
+  <div class="brand">
+    <span class="logo" aria-hidden="true"><svg viewBox="0 0 32 32" width="24" height="24"><path d="M8 23 16 8l8 15H8Z" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="16" cy="8" r="3" fill="currentColor"/><circle cx="8" cy="23" r="3" fill="currentColor"/><circle cx="24" cy="23" r="3" fill="currentColor"/></svg></span>
+    <span class="brand-name">AgentLink <small>多智能体协作工作台</small></span>
+  </div>
+  <div class="top-actions">
+    <button id="open-flow" type="button">任务流程大屏</button>
+    <div id="hostbar" class="hostbar" aria-live="polite"></div>
+  </div>
 </header>
 <div class="layout">
   <nav class="side" aria-label="项目">
@@ -18,30 +25,39 @@
     <ul id="projects" class="projects"></ul>
     <form id="add-project" class="add">
       <label for="add-root">添加项目目录</label>
-      <input id="add-root" placeholder="例如 C:\Projects\MyProject" autocomplete="off" required>
+      <input id="add-root" placeholder="输入项目文件夹路径" autocomplete="off" required>
       <button type="submit">添加</button>
     </form>
   </nav>
   <main id="main">
+    <section id="flow-screen" hidden aria-label="所有项目任务流程大屏">
+      <div class="flow-entry"><button id="close-flow" type="button">返回项目面板</button></div>
+      <div id="flow-root"></div>
+    </section>
+    <div id="project-view">
     <section id="empty" class="empty">
       <h1>选择或添加一个项目</h1>
-      <p>在左侧填写项目目录，然后为 Claude Code、Codex、DeepSeek 各选一个对话绑定。确认后会在项目目录生成 AGENTLINK.md 协作约定，并在 AGENTS.md / CLAUDE.md 写入托管段落。</p>
+      <p>连接 Claude Code、Codex 与 DeepSeek，在一个工作台里分配任务、跟踪进度和完成验收。</p>
+      <p class="muted">从左侧添加项目文件夹，再选择各智能体的协作对话即可开始。</p>
     </section>
     <section id="project" hidden>
       <div class="phead">
         <div>
+          <div class="page-eyebrow">项目工作台</div>
           <h1 id="pname"></h1>
           <div id="proot" class="muted mono"></div>
         </div>
         <div class="tabs" role="tablist">
-          <button role="tab" data-tab="bind" aria-selected="true">绑定</button>
-          <button role="tab" data-tab="tasks" aria-selected="false">任务</button>
+          <button role="tab" data-tab="tasks" aria-selected="true">任务</button>
+          <button role="tab" data-tab="bind" aria-selected="false">绑定</button>
           <button role="tab" data-tab="hosts" aria-selected="false">宿主插件</button>
           <button role="tab" data-tab="settings" aria-selected="false">设置 / 迁移</button>
         </div>
       </div>
 
-      <div id="tab-bind" class="tab">
+      <div id="overview" class="overview" aria-live="polite"></div>
+
+      <div id="tab-bind" class="tab" hidden>
         <div class="toolbar">
           <label class="check"><input type="checkbox" id="show-all"> 显示所有目录的对话</label>
           <button id="refresh-sessions" type="button" class="ghost">刷新对话</button>
@@ -75,9 +91,10 @@
         </details>
       </div>
 
-      <div id="tab-tasks" class="tab" hidden>
+      <div id="tab-tasks" class="tab">
+        <details id="post-box" class="post-box">
+          <summary>发出新任务（发起方：你）</summary>
         <form id="post" class="post">
-          <h2>发出任务（发起方：你）</h2>
           <div class="row">
             <label>交给
               <select name="to"><option value="deepseek">DeepSeek</option><option value="codex">Codex</option><option value="claude">Claude Code</option></select>
@@ -98,9 +115,24 @@
             <span id="post-result" class="muted" aria-live="polite"></span>
           </div>
         </form>
+        </details>
         <div class="toolbar">
-          <label class="check"><input type="checkbox" id="wake"> 自动唤醒</label>
+          <label>状态筛选
+            <select id="state-filter" aria-label="按状态筛选任务">
+              <option value="">全部进行中</option>
+              <option value="posted">待领取</option>
+              <option value="claimed">进行中</option>
+              <option value="delivered">待验收</option>
+              <option value="ai_review">AI 审查</option>
+              <option value="rework">返工</option>
+              <option value="blocked">受阻</option>
+              <option value="paused">已暂停调度</option>
+              <option value="recalling">等待停止确认</option>
+            </select>
+          </label>
+          <label>搜索 <input id="task-search" type="search" placeholder="ID / 标题 / 路径" aria-label="搜索任务"></label>
           <label class="check"><input type="checkbox" id="show-done"> 显示已结束</label>
+          <label class="check"><input type="checkbox" id="wake"> 自动唤醒</label>
           <span id="wake-info" class="muted"></span>
         </div>
         <div id="board" class="board"></div>
@@ -123,6 +155,10 @@
           <legend>程序自动验收</legend>
           <label class="check"><input type="checkbox" id="opt-autoAccept-L0"> L0 机械任务：程序验收通过即自动验收</label>
           <label class="check"><input type="checkbox" id="opt-autoAccept-L1"> L1 规格明确任务：程序验收通过即自动验收</label>
+          <label>协作规则提醒间隔（完成任务轮数）
+            <input id="opt-rulesReminderEvery" type="number" min="0" max="200" step="1" value="20" required>
+          </label>
+          <p class="note">默认每完成 20 轮任务重申一次规则，0 表示关闭。规则随下一次正常对话注入，不额外唤醒 AI。</p>
           <div class="toolbar">
             <button id="save-settings" type="button" class="primary">保存设置</button>
             <span id="settings-result" class="muted" aria-live="polite"></span>
@@ -142,9 +178,11 @@
         </fieldset>
       </div>
     </section>
+    </div>
   </main>
 </div>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="/flow.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

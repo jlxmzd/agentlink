@@ -8,18 +8,22 @@ const AGENTS = {
 };
 const STATE_LABEL = {
   posted: '待领取', claimed: '进行中', delivered: '待验收', rework: '返工', blocked: '受阻',
+  paused: '已暂停调度', recalling: '等待停止确认',
   ai_review: 'AI 审查中', accepted: '已验收', cancelled: '已取消',
 };
 const AI_STATUS = {
-  pending: '待投递', sending: '投递中', sent: '审查中', accepted: '审查通过', rejected: '审查驳回',
-  failed: '未送达', uncertain: '投递不确定',
+  pending: '待投递', sending: '投递中（持有发送租约）', sent: '已入队·未确认启动', started: '审查中（已确认）',
+  accepted: '审查通过', rejected: '审查驳回', failed: '未送达', uncertain: '投递不确定', stalled: '审查停滞',
 };
 const $ = sel => document.querySelector(sel);
-const state = { projects: [], current: null, sessions: null, picks: {}, reviewPick: null, reviewEnabled: false, search: {}, open: {}, tasks: null, hosts: null, tab: 'bind' };
+const state = { projects: [], current: null, sessions: null, picks: {}, reviewPick: null, reviewEnabled: false, search: {}, open: {}, tasks: null, hosts: null, tab: 'tasks' };
+// 任务操作的定义、确认文案与防双击都在 actions.js 里，面板与大屏共用同一份，避免两处各写一套。
+const ACT = window.AgentLinkFlow.actions;    // 与流程大屏同一份策略，见 flow.js
+const runner = ACT.createRunner((path, body) => api(path, body));
 
 // -- helpers -------------------------------------------------------------------
-async function api(path, body) {
-  const init = { headers: { 'X-AgentLink-Token': TOKEN } };
+async function api(path, body, signal) {
+  const init = { headers: { 'X-AgentLink-Token': TOKEN }, signal };
   if (body !== undefined) {
     init.method = 'POST';
     init.headers['Content-Type'] = 'application/json';
@@ -83,8 +87,12 @@ function renderProjects() {
   if (!state.projects.length) list.append(el('li', { class: 'muted' }, '还没有项目'));
 }
 
+let projectLoadGeneration = 0;
 async function openProject(root) {
-  state.current = await api('/api/project' + params({ root }));
+  const generation = ++projectLoadGeneration;
+  const next = await api('/api/project' + params({ root }));
+  if (generation !== projectLoadGeneration) return;
+  state.current = next;
   state.picks = {};
   for (const a of Object.keys(AGENTS)) {
     const b = state.current.bindings[a];
@@ -100,6 +108,7 @@ async function openProject(root) {
   state.tasks = null;
   $('#empty').hidden = true;
   $('#project').hidden = false;
+  selectTab(state.tab || 'tasks');
   $('#pname').textContent = state.current.name;
   $('#proot').textContent = state.current.root;
   const o = state.current.options;
@@ -111,7 +120,6 @@ async function openProject(root) {
   renderProjects();
   renderAgents();
   loadSessions();
-  if (state.tab === 'tasks') loadTasks();
   if (state.tab === 'hosts') loadHosts();
   if (state.tab === 'settings') loadSettings();
 }
@@ -303,20 +311,96 @@ $('#apply').addEventListener('click', async () => {
 });
 
 // -- tasks ---------------------------------------------------------------------
+let taskLoadGeneration = 0;
 async function loadTasks() {
   if (!state.current) return;
+  const generation = ++taskLoadGeneration;
   try {
-    state.tasks = await api('/api/tasks' + params({ root: state.current.root }));
+    const root = state.current.root;
+    const data = await api('/api/tasks' + params({ root }));
+    if (!state.current || state.current.root !== root || generation !== taskLoadGeneration) return;
+    // /api/tasks 只返回当前项目的任务，未必带 projectRoot；补上它，任务操作与唯一键才有正确归属。
+    data.tasks = (data.tasks || []).map(t => Object.assign({}, t, { projectRoot: t.projectRoot || root }));
+    state.tasks = data;
     renderTasks();
   } catch (e) { toast(e.message, true); }
+}
+
+function renderOverview(tasks) {
+  const box = $('#overview');
+  if (!box) return;
+  const open = tasks.filter(x => !['accepted', 'cancelled'].includes(x.state));
+  const waiting = ACT.waitingTasks(open);
+  const counts = {
+    open: open.length,
+    delivered: open.filter(x => x.state === 'delivered').length,
+    blocked: open.filter(x => x.state === 'blocked').length,
+    paused: open.filter(x => x.state === 'paused').length,
+    recalling: open.filter(x => x.state === 'recalling').length,
+    aiReview: open.filter(x => x.state === 'ai_review').length,
+  };
+  const chip = (num, label) => el('span', { class: 'ov-chip' }, el('b', {}, String(num)), el('span', { class: 'muted' }, label));
+  box.replaceChildren(
+    el('span', { class: 'ov-project', title: state.current ? state.current.root : '' }, state.current ? state.current.name : '—'),
+    chip(tasks.length, '任务'), chip(counts.open, '进行中'), chip(counts.delivered, '待验收'),
+    chip(counts.blocked, '受阻'), chip(counts.paused, '已暂停'), chip(counts.recalling, '等确认'),
+    chip(counts.aiReview, 'AI 审查'),
+    waiting.length
+      ? el('span', { class: 'ov-waiting', role: 'status' }, '待处理 ' + waiting.length + ' 项 · ' +
+        waiting.slice(0, 3).map(w => w.task.id + '（' + w.label + '）').join('、') + (waiting.length > 3 ? ' …' : ''))
+      : el('span', { class: 'muted' }, '没有待你处理的'));
 }
 
 function renderTasks() {
   const t = state.tasks;
   if (!t) return;
+  renderOverview(t.tasks);
   const showDone = $('#show-done').checked;
-  const rows = t.tasks.filter(x => showDone || !['accepted', 'cancelled'].includes(x.state)).reverse();
-  $('#board').replaceChildren(...(rows.length ? rows.map(taskCard) : [el('p', { class: 'muted' }, state.current.confirmed ? '没有进行中的任务' : '先在「绑定」页确认绑定')]));
+  const wantState = $('#state-filter') ? $('#state-filter').value : '';
+  const term = ($('#task-search') ? $('#task-search').value : '').trim().toLowerCase();
+  const rows = t.tasks.filter(x => {
+    if (!showDone && ['accepted', 'cancelled'].includes(x.state)) return false;
+    if (wantState && x.state !== wantState) return false;
+    if (term) {
+      const hay = [x.id, x.title, (x.paths || []).join(' '), x.state, x.to].join(' ').toLowerCase();
+      if (!hay.includes(term)) return false;
+    }
+    return true;
+  }).reverse();
+  const board = $('#board');
+  const existing = new Map(Array.from(board.children).map(n => [n.dataset.key, n]));
+  const nodes = rows.map(task => {
+    const key = (task.projectRoot || '') + '|' + task.id;
+    const old = existing.get(key);
+    const fr = task.finalReview;
+    const signature = JSON.stringify(Object.assign({}, task, {
+      finalReview: fr ? Object.assign({}, fr, {ageSeconds: Math.floor(fr.ageSeconds / 60)}) : null,
+    }));
+    if (old && old.taskSignature === signature) return old;
+    const node = taskCard(task);
+    node.taskSignature = signature;
+    if (old) {
+      node.open = old.open;
+      const oldNote = old.querySelector('input');
+      if (oldNote && node.querySelector('input')) node.querySelector('input').value = oldNote.value;
+      const oldKind = old.querySelector('select');
+      if (oldKind && node.querySelector('select')) node.querySelector('select').value = oldKind.value;
+    }
+    return node;
+  });
+  if (!nodes.length) nodes.push(el('p', { class: 'muted' }, state.current.confirmed ? '没有匹配的任务' : '先在「绑定」页确认绑定'));
+  const active = document.activeElement;
+  const activeRow = active && active.closest('.task');
+  const focusKey = activeRow && activeRow.dataset.key;
+  const action = active && active.dataset.action;
+  nodes.forEach((node, i) => { if (board.children[i] !== node) board.insertBefore(node, board.children[i] || null); });
+  Array.from(board.children).forEach(n => { if (!nodes.includes(n)) n.remove(); });
+  if (focusKey && !active.isConnected) {
+    const row = nodes.find(n => n.dataset.key === focusKey);
+    const target = row && (action ? Array.from(row.querySelectorAll('[data-action]')).find(n => n.dataset.action === action)
+      : row.querySelector(active.tagName === 'INPUT' ? 'input' : active.tagName === 'SELECT' ? 'select' : 'summary'));
+    if (target) target.focus({preventScroll: true});
+  }
   $('#events').replaceChildren(...t.events.slice().reverse().map(e =>
     el('li', {}, `${when(e.t)}  ${e.task}  ${e.by} ${e.action}${e.note ? '：' + e.note : ''}`)));
   const w = t.wake;
@@ -330,52 +414,88 @@ function renderTasks() {
   }
 }
 
+// 大屏没有输入框，需要备注的操作用一个 prompt 收集，绝不编造意见。
+function collectNote(action, task) {
+  if (!ACT.spec(action).note) return undefined;
+  const text = window.prompt('给 ' + task.id + ' 填写驳回意见（必须具体）：', '');
+  if (text === null) throw new Error('已取消：没有填写驳回意见');
+  return text;
+}
+
+// 一个统一的任务操作入口：面板与流程大屏都通过它执行，规则来自后端 actions 白名单。
+async function runTaskAction(task, action, opts = {}) {
+  const confirmSpec = ACT.needsConfirm(action) ? ACT.describeConfirm(action, task) : null;
+  if (confirmSpec && !opts.preconfirmed) {
+    if (!confirm(confirmSpec.title + '\n\n' + confirmSpec.body + (confirmSpec.caution ? '\n\n' + confirmSpec.caution : ''))) {
+      return { cancelled: true };
+    }
+  }
+  const out = await runner.run(task, action, { note: opts.note, kind: opts.kind });
+  if (out && out.skipped) return { skipped: true };
+  toast(`${task.id}：${STATE_LABEL[(out && out.state) || ''] || (out && out.state) || '已处理'}`);
+  return out;
+}
+
 function taskCard(t) {
-  const isMine = t.from === 'user';
+  const plan = ACT.planAction(t);                       // 后端白名单决定能做什么；旧快照只读
   const note = el('input', { placeholder: '备注 / 返工意见', 'aria-label': '备注' });
-  const act = (action, extra = {}) => async () => {
-    if (action === 'reject' && !note.value.trim()) { note.focus(); return toast('驳回需要写清具体问题', true); }
-    try {
-      const out = await api('/api/task/act', { root: state.current.root, id: t.id, action, note: note.value, ...extra });
-      toast(`${t.id}：${STATE_LABEL[out.state] || out.state}${out.escalated ? '，已转交 ' + label(out.escalated) + ' 整改' : ''}${out.advice ? '。' + out.advice : ''}${out.dispatch ? '（投递 ' + out.dispatch + '）' : ''}`);
-      loadTasks();
-    } catch (e) { toast(e.message, true); }
-  };
+  const kind = el('select', { 'aria-label': '问题类型' },
+    el('option', { value: 'code' }, '代码问题'), el('option', { value: 'design' }, '设计问题'));
+  const needNote = plan.items.some(i => i.needsNote);
+
   const acts = [];
-  const kind = el('select', { 'aria-label': '问题类型' }, el('option', { value: 'code' }, '代码问题'), el('option', { value: 'design' }, '设计问题'));
-  if (isMine && t.state === 'delivered') {
-    acts.push(note, el('button', { class: 'primary', onclick: act('accept') }, '验收'));
-    if (t.to === 'deepseek') acts.push(kind);
-    acts.push(el('button', { onclick: () => act('reject', { kind: kind.value })() }, '驳回返工'));
-  }
-  if (isMine && ['posted', 'claimed', 'rework', 'blocked', 'delivered', 'ai_review'].includes(t.state)) {
-    if (!acts.length) acts.push(note);
-    const target = el('select', { 'aria-label': '转交给' }, Object.entries(AGENTS).filter(([a]) => a !== t.to).map(([a, i]) => el('option', { value: a }, i.label)));
-    acts.push(target, el('button', { onclick: () => act('reassign', { to: target.value })() }, '转交'), el('button', { class: 'ghost', onclick: act('cancel') }, '取消任务'));
-  }
-  const d = t.dispatch;
-  if (t.to === 'deepseek' && d && ['held', 'pending', 'uncertain'].includes(d.state)) {
-    acts.push(el('button', {
-      onclick: () => {
-        if (d.state === 'uncertain' && !confirm('上次投递结果不确定。确认 DeepSeek 没有收到这条任务后再重发，否则会重复执行。继续？')) return;
-        act('dispatch')();
+  plan.items.forEach(item => {
+    const button = el('button', {
+      class: 'task-action-' + item.tone + (item.tone === 'primary' ? ' primary' : (item.unknown ? ' ghost' : '')),
+      'data-action': item.action,
+      title: item.detail || undefined,
+      onclick: async () => {
+        if (runner.isBusy(t.id, item.action)) return;      // 双击只算一次
+        button.disabled = true;
+        try {
+          const out = await runTaskAction(t, item.action, { note: needNote ? note.value : undefined, kind: kind.value });
+          if (out && out.cancelled) return;
+          await loadTasks();                              // 成功后刷新，失败保留当前快照
+        } catch (error) {
+          toast(error.message, true);
+        } finally {
+          button.disabled = false;
+        }
       },
-    }, d.state === 'held' ? '投递给 DeepSeek' : '重试投递'));
-  }
+    }, item.label);
+    if (item.needsNote) button.setAttribute('data-needs-note', '1');
+    acts.push(button);
+  });
+
+  if (plan.readOnly) acts.push(el('span', { class: 'muted fine' }, '只读：这份快照没有提供可执行操作'));
+  else if (needNote) acts.unshift(note, kind);
+
+  const fr = ACT.finalReviewText(t.finalReview);
+  const finalBox = fr ? el('pre', { class: 'final ' + (t.finalReview && t.finalReview.overdue ? 'overdue' : '') }, fr) : null;
+
+  const d = t.dispatch;
   const ai = t.aiReview;
-  if (t.state === 'ai_review' && ai && ['failed', 'uncertain', 'sending'].includes(ai.status)) {
-    acts.push(el('button', { onclick: act('dispatch') }, '重试 AI 审查'));
-  }
   const r = t.receipt;
-  return el('details', { class: 'task', style: '--c:' + (AGENTS[t.to] ? AGENTS[t.to].color : 'var(--line)') },
+
+  return el('details', { class: 'task', 'data-key': (t.projectRoot || '') + '|' + t.id, style: '--c:' + (AGENTS[t.to] ? AGENTS[t.to].color : 'var(--line)') },
     el('summary', {},
       el('span', { class: 'id mono' }, t.id),
       el('span', { class: 'badge ' + t.state }, STATE_LABEL[t.state] || t.state),
-      el('span', { class: 'muted' }, `${label(t.from)} → ${label(t.to)} · ${t.level}`),
-      el('span', {}, t.title),
-      d ? el('span', { class: 'muted' }, '投递：' + d.state + (d.reason ? '（' + d.reason + '）' : '') + (d.stalled ? ' · 疑似停滞' : '')) : null,
-      ai ? el('span', { class: 'muted' }, 'AI 验收：' + (AI_STATUS[ai.status] || ai.status)) : null),
+      el('span', { class: 'task-title' }, t.title),
+      el('span', { class: 'muted task-route' }, `${routeOf(t)} · ${t.level}`),
+      // A dispatch record without a state (older snapshots) must not print "投递：undefined".
+      d && d.state ? el('span', { class: 'muted task-extra' }, '投递：' + d.state + (d.reason ? '（' + d.reason + '）' : '') + (d.stalled ? ' · 疑似停滞' : '')) : null,
+      ai ? el('span', { class: 'muted task-extra' }, 'AI 验收：' + (AI_STATUS[ai.status] || ai.status)) : null,
+      t.state === 'recalling' && t.recall ? el('span', { class: 'muted' }, '停止确认：等待 ' + label(t.recall.from || t.from) +
+        (t.recall.intent === 'cancel' ? ' · 确认后终止' : ' · 确认后转交') +
+        (t.recall.overdue ? ' · 已超时' : '')) : null,
+      t.finalReview ? el('span', { class: 'muted' }, '等待：' + ACT.ownerLabel(t.finalReview.owner) +
+        (t.finalReview.overdue ? ' · 已超时' : '')) : null),
     el('div', { class: 'muted mono' }, '路径：' + (t.paths.join(', ') || '（未限定）') + (t.build ? ' · 构建锁' : '') + ' · 基线 ' + (t.base || '-')),
+    finalBox,
+    t.state === 'blocked' ? el('pre', { class: 'review' }, blockerText(t)) : null,
+    t.executionIssue && t.executionIssue.status === 'unreported' && ['posted', 'claimed', 'rework'].includes(t.state)
+      ? el('p', { class: 'muted' }, '执行回执缺失：等待总控核查。原状态与文件锁保留，尚未确认工具停止。') : null,
     t.escalation ? el('p', { class: 'escalated' }, `整改：DeepSeek 返工 ${t.escalation.rejects} 次未解决（${t.escalation.kind === 'design' ? '设计' : '代码'}问题），已转交 ${label(t.escalation.to)}`) : null,
     el('pre', {}, t.spec || ''),
     t.guide ? el('pre', { class: 'guide' }, '实现指引：\n' + t.guide) : null,
@@ -383,7 +503,40 @@ function taskCard(t) {
     t.gate ? el('pre', { class: 'gate' }, gateText(t)) : null,
     ai ? el('pre', { class: 'review' }, aiReviewText(t)) : null,
     t.review && t.review.note ? el('p', { class: 'muted' }, '审查意见：' + t.review.note) : null,
+    t.control ? el('p', { class: 'muted' }, '调度控制：' + (t.control.note || '—') + '（' + (t.control.by || '-') + '，' + when(t.control.at) + '）') : null,
+    (t.state === 'recalling' || (t.recall && t.recall.status)) ? el('pre', { class: 'recall' }, recallText(t)) : null,
     acts.length ? el('div', { class: 'acts' }, acts) : null);
+}
+
+function blockerText(t) {
+  const b = t.blocker || {};
+  const last = [...(t.history || [])].reverse().find(x => x.action === 'block');
+  const lines = ['受阻：等待 ' + label(b.owner || (state.current && state.current.options && state.current.options.lead) || 'codex') + ' 处理',
+    '原因：' + (b.reason || (last && last.note) || '待核查')];
+  for (const [key, title] of [['missing', '缺少条件'], ['attempts', '已尝试'], ['helpNeeded', '需要帮助']]) {
+    if (b[key]) lines.push(title + '：' + b[key]);
+  }
+  if (b.evidence && b.evidence.length) lines.push('证据：' + b.evidence.join(', '));
+  lines.push('总控先尝试解决，仍无法解决时再联系你；任务保留。');
+  return lines.join('\n');
+}
+
+// 停止确认的事实来源只有 task.recall：谁要停、确认后去哪、通知发了没有、是否超时。
+// 超时也不等于可以跳过确认，所以这里只提醒，不给"已完成"的说法。
+function recallText(t) {
+  const r = t.recall || {};
+  if (r.status === 'confirmed') return '停止确认：原执行方已确认停止（' + when(r.confirmedAt) + '），移交或终止已生效。';
+  const out = ['停止确认：' + (r.status || 'pending')];
+  if (r.from) out.push('等待原执行方：' + label(r.from) + ' 停止写入、工具与子智能体');
+  if (r.intent === 'cancel') out.push('确认后：终止任务');
+  else if (r.to) out.push('确认后：交给 ' + label(r.to));
+  else out.push('确认后：转交');
+  if (r.at) out.push('发起于 ' + when(r.at));
+  if (r.notification) out.push('停止请求：' + r.notification);
+  if (r.note) out.push('说明：' + r.note);
+  if (r.overdue) out.push('已超过预期等待时间；确认不能被跳过，仍需原执行方回话');
+  out.push('提示：确认只代表调度可以继续，不会结束宿主的 AI 进程，也不回滚已写入的文件。');
+  return out.join('\n');
 }
 
 function gateText(t) {
@@ -400,15 +553,27 @@ function aiReviewText(t) {
   const ai = t.aiReview || {}, session = ai.session || {};
   const out = ['AI 验收：' + (AI_STATUS[ai.status] || ai.status || '-')];
   if (session.id) out.push('审查对话：' + (session.title || session.id));
+  if (ai.status === 'sent') out.push('提示已入队，但审查方还没确认开始（reviewer --verdict started）。超时后会用同一个 requestId 重投。');
+  if (ai.status === 'sending') out.push('正在投递：其他进程持有租约，会等它过期后由任一方接手。');
+  if (ai.status === 'stalled' && ai.startedAt) out.push('审查已启动但长时间无结论：请在原审查会话核实并提交结论；不会重复派发。');
+  if (ai.status === 'stalled' && !ai.startedAt) out.push('已停止自动重投（' + (ai.attempts || 0) + ' 次无进展），需要人工处理：确认审查对话后点「重试 AI 审查」，每次人工恢复最多追加一次投递。');
   if (ai.note) out.push('审查意见：' + ai.note);
   if (ai.error) out.push('错误：' + ai.error);
+  if (ai.status === 'started' && ai.startedAt) out.push('开始时间：' + when(ai.startedAt));
   if (t.state === 'ai_review' && ['failed', 'uncertain'].includes(ai.status)) {
-    out.push('处理：在「设置 / 迁移」页确认 AI 验收对话后点「重试 AI 审查」，或直接人工验收。');
+    out.push('处理：等退避到期会自动重投；也可点「重试 AI 审查」立即重试。');
   }
   return out.join('\n');
 }
 
 const label = a => (AGENTS[a] ? AGENTS[a].label : a === 'user' ? '你' : a);
+// After a hand-over the poster is unchanged, so `from → to` alone shows "Codex → Codex" for work DeepSeek
+// had been doing. The executor chain is what the reader means, so show who was doing it, then who has it now.
+const routeOf = t => {
+  const origin = t.origin || (t.handoverFrom && t.handoverFrom.length ? t.handoverFrom[0].from : null);
+  const from = t.escalation && origin ? origin : t.from;
+  return `${label(from)} → ${label(t.to)}${t.escalation ? '（转交）' : ''}`;
+};
 
 $('#post').addEventListener('submit', async ev => {
   ev.preventDefault();
@@ -430,6 +595,8 @@ $('#wake').addEventListener('change', async ev => {
   catch (e) { toast(e.message, true); }
 });
 $('#show-done').addEventListener('change', renderTasks);
+$('#state-filter').addEventListener('change', renderTasks);
+$('#task-search').addEventListener('input', renderTasks);
 
 // -- hosts ---------------------------------------------------------------------
 async function loadHosts() {
@@ -489,6 +656,7 @@ function renderSettings() {
   const accept = state.current.options.autoAccept || [];
   $('#opt-autoAccept-L0').checked = accept.includes('L0');
   $('#opt-autoAccept-L1').checked = accept.includes('L1');
+  $('#opt-rulesReminderEvery').value = state.current.options.rulesReminderEvery ?? 20;
   $('#settings-result').textContent = '程序自动验收：' + (accept.length ? accept.join('、') : '无');
 }
 
@@ -496,7 +664,10 @@ $('#save-settings').addEventListener('click', async () => {
   const root = state.current.root;
   const autoAccept = ['L0', 'L1'].filter(level => $('#opt-autoAccept-' + level).checked);
   try {
-    const saved = await api('/api/project/settings', { root, options: { autoAccept } });
+    const input = $('#opt-rulesReminderEvery');
+    if (!input.reportValidity()) return;
+    const rulesReminderEvery = Number(input.value);
+    const saved = await api('/api/project/settings', { root, options: { autoAccept, rulesReminderEvery } });
     if (state.current && state.current.root === root) { state.current = saved; renderSettings(); }
     toast('设置已保存');
   } catch (e) { toast(e.message, true); }
@@ -539,16 +710,73 @@ $('#import-migration').addEventListener('change', async ev => {
 });
 
 // -- tabs and refresh ----------------------------------------------------------
-document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => {
-  state.tab = b.dataset.tab;
-  document.querySelectorAll('[data-tab]').forEach(x => x.setAttribute('aria-selected', String(x === b)));
-  for (const name of ['bind', 'tasks', 'hosts', 'settings']) $('#tab-' + name).hidden = name !== state.tab;
-  if (state.tab === 'tasks') loadTasks();
-  if (state.tab === 'hosts') loadHosts();
-  if (state.tab === 'settings') loadSettings();
+const flowScreen = window.AgentLinkFlow.mount($('#flow-root'), {
+  actions: ACT,
+  // flow 只负责禁用/防双击/异常提示；确认弹层与 API 在这里，两处界面因此行为一致。
+  onAction: async (task, action) => {
+    const out = await runTaskAction(task, action, { note: collectNote(action, task) });
+    if (out && out.cancelled) { const err = new Error('已取消操作'); err.stale = false; throw err; }
+    return out;
+  },
+  load: async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try { return await api('/api/flow', undefined, controller.signal); }
+    catch (error) {
+      if (error.name === 'AbortError') throw new Error('读取任务状态超时，将自动重试');
+      throw error;
+    } finally { clearTimeout(timeout); }
+  },
+  onOpenTask: async task => {
+    try {
+      await openProject(task.projectRoot || (state.current && state.current.root));
+      closeFlow();
+      if (['accepted', 'cancelled'].includes(task.state)) $('#show-done').checked = true;
+      document.querySelector('[data-tab="tasks"]').click();
+      await loadTasks();
+      const rows = Array.from($('#board').children);
+      const match = rows.find(row => row.querySelector('.id')?.textContent === task.id);
+      if (match) { match.open = true; match.scrollIntoView({ block: 'center' }); }
+    } catch (error) { toast(error.message, true); }
+  },
+});
+function closeFlow() {
+  flowScreen.stop();
+  document.body.classList.remove('flow-mode');
+  $('#flow-screen').hidden = true;
+  $('#project-view').hidden = false;
+  $('#open-flow').focus();
+}
+$('#open-flow').addEventListener('click', () => {
+  document.body.classList.add('flow-mode');
+  $('#project-view').hidden = true;
+  $('#flow-screen').hidden = false;
+  flowScreen.start();
+  $('#close-flow').focus();
+});
+$('#close-flow').addEventListener('click', closeFlow);
+function selectTab(name, focus) {
+  state.tab = name;
+  document.querySelectorAll('[data-tab]').forEach(x => x.setAttribute('aria-selected', String(x.dataset.tab === name)));
+  for (const tab of ['bind', 'tasks', 'hosts', 'settings']) $('#tab-' + tab).hidden = tab !== name;
+  if (focus) { const btn = document.querySelector('[data-tab="' + name + '"]'); if (btn) btn.focus(); }
+  if (name === 'tasks') loadTasks();
+  if (name === 'hosts') loadHosts();
+  if (name === 'settings') loadSettings();
+}
+document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('click', () => selectTab(b.dataset.tab)));
+// Arrow keys move between tabs, which is what a tablist is expected to do.
+document.querySelectorAll('[data-tab]').forEach(b => b.addEventListener('keydown', ev => {
+  const tabs = Array.from(document.querySelectorAll('[data-tab]'));
+  const at = tabs.indexOf(b);
+  if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+    ev.preventDefault();
+    const next = tabs[(at + (ev.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+    selectTab(next.dataset.tab, true);
+  }
 }));
 
-setInterval(() => { if (state.tab === 'tasks' && !document.hidden) loadTasks(); }, 5000);
+setInterval(() => { if (state.tab === 'tasks' && !document.hidden && $('#flow-screen').hidden) loadTasks(); }, 5000);
 
 (async () => {
   try {

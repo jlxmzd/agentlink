@@ -7,4 +7,4 @@
 报告漏洞时不要在公开 Issue 附凭据、完整利用细节或私人会话。
 仓库启用 GitHub Private vulnerability reporting 后，请使用 Security 页私密报告。
 如果尚未启用，可先发不含敏感细节的联系请求，由维护者提供私密渠道。
-当前维护版本：1.0.x。
+当前维护版本：1.1.x。

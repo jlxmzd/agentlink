@@ -12,11 +12,14 @@ import tempfile
 TMP = Path(tempfile.mkdtemp(prefix='agentlink-harness-test-'))
 HOME = TMP / 'home'
 os.environ['AGENTLINK_USER_HOME'] = str(HOME)
+# AGENTLINK_HOME wins over AGENTLINK_USER_HOME for the project registry; scope it to this sandbox too.
+os.environ['AGENTLINK_HOME'] = str(HOME / '.agentlink')
 os.environ['AGENTLINK_NO_WAKE'] = '1'
 os.environ.pop('AGENTLINK_NO_DISPATCH', None)
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from agentlink import harness, project as P, sessions  # noqa: E402
+from agentlink.bus import AI_START_TIMEOUT, AI_STALL_SECONDS, AI_RETRY_MAX, AI_RETRY_LIMIT  # noqa: E402
 
 DSH = HOME / '.dsh'
 RESULTS = []
@@ -410,20 +413,39 @@ SESSIONS = [
 ]
 
 
+def fresh_review_bus(name):
+    """An isolated project for one AI-review check: a failure in one check can never leak path locks into
+    the next (a task left in ai_review or rework holds its paths until it is cancelled)."""
+    root = TMP / ('ai-' + name)
+    (root / 'src').mkdir(parents=True)
+    proj = P.Project(root)
+    proj.apply({'codex': {'id': '01a143dc-fea9-7491-934e-95b1c08226af'},
+                'deepseek': {'id': 'session-exec', 'title': '执行'}},
+               options={'aiReviewEnabled': True, 'aiReviewSession': {'id': 'session-review', 'title': 'AI 审查'}})
+    sessions = [
+        {'sessionId': 'session-exec', 'cwd': str(root), 'running': False,
+         'projections': {'values': {'title': '执行'}}},
+        {'sessionId': 'session-review', 'cwd': str(root), 'running': False,
+         'projections': {'values': {'title': 'AI 审查'}}},
+    ]
+    return proj.bus(), sessions
+
+
 @check('AI review: a passing DeepSeek delivery goes to ai_review and prompts the review session once')
 def _():
     os.environ.pop('AGENTLINK_NO_DISPATCH', None)
     write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
-    FakeClient.items = list(SESSIONS)
+    bus, sessions = fresh_review_bus('prompt-once')
+    FakeClient.items = list(sessions)
     FakeClient.prompts = []
     original = harness.Client
     harness.Client = FakeClient
     try:
-        t = ABUS.post('codex', 'deepseek', 'Review flow', '实现 src 里的功能', level='L1', paths=['src'], no_dispatch=True)
-        ABUS.claim('deepseek', t['id'])
-        out = ABUS.deliver('deepseek', t['id'], 'done')
+        t = bus.post('codex', 'deepseek', 'Review flow', '实现 src 里的功能', level='L1', paths=['src'], no_dispatch=True)
+        bus.claim('deepseek', t['id'])
+        out = bus.deliver('deepseek', t['id'], 'done')
         assert out['state'] == 'ai_review' and out.get('auto') is None, out
-        task = ABUS.load(t['id'])
+        task = bus.load(t['id'])
         assert task['aiReview']['status'] == 'sent', task['aiReview']
         assert task['aiReview']['session']['id'] == 'session-review', task['aiReview']
         prompts = [p for p in FakeClient.prompts if p['sessionId'] == 'session-review']
@@ -432,52 +454,73 @@ def _():
         for needle in (t['id'], 'src', '只负责审查', '不要修改任何文件', 'reviewer', '程序验收'):
             assert needle in text, needle
         assert prompts[0]['requestId'] == task['aiReview']['requestId']
-        raises(lambda: ABUS.deliver('deepseek', t['id'], 'again'), 'ai_review')
-        ABUS.ai_review_send(t['id'])                                    # never sent twice per delivery
+        raises(lambda: bus.deliver('deepseek', t['id'], 'again'), 'ai_review')
+        bus.ai_review_send(t['id'])                                     # never sent twice per delivery
         assert len([p for p in FakeClient.prompts if p['sessionId'] == 'session-review']) == 1
     finally:
         harness.Client = original
+        bus.review('codex', t['id'], 'cancel', 'test cleanup')
 
 
 @check('AI review: accept hands the task to the poster, reject sends it back with the note')
 def _():
     os.environ.pop('AGENTLINK_NO_DISPATCH', None)
     write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
-    FakeClient.items = list(SESSIONS)
+    bus, sessions = fresh_review_bus('accept-reject')
+    FakeClient.items = list(sessions)
     FakeClient.prompts = []
     original = harness.Client
     harness.Client = FakeClient
+    created = []                                                   # every task this check opens, for cleanup
     try:
-        t = ABUS.post('codex', 'deepseek', 'Accept flow', 'x', level='L1', paths=['accept-flow'], no_dispatch=True)
-        ABUS.claim('deepseek', t['id'])
-        ABUS.deliver('deepseek', t['id'], 'done')
-        token = ABUS.load(t['id'])['aiReview']['token']
-        raises(lambda: ABUS.ai_review('claude', t['id'], 0, token, 'accept'), 'DeepSeek')
-        raises(lambda: ABUS.ai_review('deepseek', t['id'], 0, 'wrong-token', 'accept'), '令牌')
-        raises(lambda: ABUS.ai_review('deepseek', t['id'], 3, token, 'accept'), '序号')
-        out = ABUS.ai_review('deepseek', t['id'], 0, token, 'accept')
+        t = bus.post('codex', 'deepseek', 'Accept flow', 'x', level='L1', paths=['accept-flow'], no_dispatch=True)
+        created.append(t['id'])
+        bus.claim('deepseek', t['id'])
+        bus.deliver('deepseek', t['id'], 'done')
+        token = bus.load(t['id'])['aiReview']['token']
+        raises(lambda: bus.ai_review('claude', t['id'], 0, token, 'accept'), 'DeepSeek')
+        raises(lambda: bus.ai_review('deepseek', t['id'], 0, 'wrong-token', 'accept'), '令牌')
+        raises(lambda: bus.ai_review('deepseek', t['id'], 3, token, 'accept'), '序号')
+        out = bus.ai_review('deepseek', t['id'], 0, token, 'accept')
         assert out['state'] == 'delivered', out
-        assert ABUS.load(t['id'])['aiReview']['status'] == 'accepted'
-        assert ABUS.ai_review('deepseek', t['id'], 0, token, 'accept').get('duplicate') is True
-        assert ABUS.review('codex', t['id'], 'accept')['state'] == 'accepted'
+        assert bus.load(t['id'])['aiReview']['status'] == 'accepted'
+        assert bus.ai_review('deepseek', t['id'], 0, token, 'accept').get('duplicate') is True
+        assert bus.review('codex', t['id'], 'accept')['state'] == 'accepted'
 
-        t2 = ABUS.post('codex', 'deepseek', 'Reject flow', 'x', level='L1', paths=['reject-flow'], no_dispatch=True)
-        ABUS.claim('deepseek', t2['id'])
-        ABUS.deliver('deepseek', t2['id'], 'done')
-        token2 = ABUS.load(t2['id'])['aiReview']['token']
-        out2 = ABUS.ai_review('deepseek', t2['id'], 0, token2, 'reject', '实现不符合规格', no_dispatch=True)
+        t2 = bus.post('codex', 'deepseek', 'Reject flow', 'x', level='L1', paths=['reject-flow'], no_dispatch=True)
+        created.append(t2['id'])
+        bus.claim('deepseek', t2['id'])
+        bus.deliver('deepseek', t2['id'], 'done')
+        token2 = bus.load(t2['id'])['aiReview']['token']
+        out2 = bus.ai_review('deepseek', t2['id'], 0, token2, 'reject', '实现不符合规格', no_dispatch=True)
         assert out2['state'] == 'rework', out2
-        task = ABUS.load(t2['id'])
+        task = bus.load(t2['id'])
         assert task['review']['note'] == '实现不符合规格' and task['aiReview']['status'] == 'rejected'
         assert task['rejects'] == 1 and 'token' not in task['aiReview']
-        raises(lambda: ABUS.ai_review('deepseek', t2['id'], 0, token2, 'accept'), 'AI 审查阶段')
-        ABUS.claim('deepseek', t2['id'])                               # rework is worked on again
-        out3 = ABUS.deliver('deepseek', t2['id'], 'fixed')
-        again = ABUS.load(t2['id'])
+        # A late callback for a finished attempt is stale, not a new error: it must not overwrite the verdict.
+        late = bus.ai_review('deepseek', t2['id'], 0, token2, 'accept')
+        assert late.get('duplicate') is True, late
+        assert bus.load(t2['id'])['state'] == 'rework'
+        # A stale callback for a finished attempt is refused without touching the state: it lands in
+        # aiReview.error for the panel, but the task itself stays where it is.
+        try:
+            late_start = bus.ai_review('deepseek', t2['id'], 0, token2, 'started')
+        except ValueError as error:
+            assert '过期' in str(error), error
+        else:
+            raise AssertionError('expected ValueError, got %r' % (late_start,))
+        assert bus.load(t2['id'])['state'] == 'rework'
+        bus.claim('deepseek', t2['id'])                               # rework is worked on again
+        out3 = bus.deliver('deepseek', t2['id'], 'fixed')
+        again = bus.load(t2['id'])
         assert out3['state'] == 'ai_review' and again['aiReview']['attempt'] == 1, again['aiReview']
         assert again['aiReview']['token'] != token2 and again['aiReview']['status'] == 'sent'
+        bus.review('codex', t2['id'], 'cancel', 'test cleanup')        # ai_review holds a lock: release it
     finally:
         harness.Client = original
+        for tid in created:                                        # a mid-check failure must not leak path locks
+            try: bus.review('codex', tid, 'cancel', 'test cleanup')
+            except ValueError: pass
 
 
 @check('AI review: a failed send stays visible and a retry reuses the same requestId')
@@ -503,6 +546,7 @@ def _():
         retried = ABUS.release(t['id'])
         assert retried['aiReview'] == 'sent', retried
         assert ABUS.load(t['id'])['aiReview']['requestId'] == request
+        ABUS.review('codex', t['id'], 'cancel', 'test cleanup')      # ai_review holds a lock: release it
     finally:
         harness.Client = original
 
@@ -526,6 +570,362 @@ def _():
         assert out['state'] == 'ai_review' and out['aiReview'] == 'failed', out
         assert '未配置' in mb.load(t['id'])['aiReview']['error']
         assert mb.load(t['id'])['state'] not in ('accepted', 'delivered')
+    finally:
+        harness.Client = original
+
+
+def _fake_clock(bus, seconds):
+    """Shift every stored review timestamp back by `seconds`, so timeout/backoff branches run without
+    sleeping. Uses the bus socket so the refreshed records are written the same way the code writes them."""
+    import datetime
+    with bus.lock:
+        for task in bus.all():
+            r = task.get('aiReview') or {}
+            for field in ('at', 'sentAt', 'startedAt', 'lease', 'lastTryAt', 'nextRetryAt'):
+                value = r.get(field)
+                if not isinstance(value, str) or not value: continue
+                try: stamp = datetime.datetime.fromisoformat(value)
+                except ValueError: continue
+                r[field] = (stamp - datetime.timedelta(seconds=seconds)).isoformat(timespec='seconds')
+            if r: task['aiReview'] = r
+            bus.save(task)
+
+
+def _review_task(bus, sessions, paths, title='AI flow'):
+    FakeClient.items = list(sessions)
+    FakeClient.prompts = []
+    t = bus.post('codex', 'deepseek', title, 'x', level='L1', paths=paths, no_dispatch=True)
+    bus.claim('deepseek', t['id'])
+    out = bus.deliver('deepseek', t['id'], 'done')
+    assert out['state'] == 'ai_review', out
+    return t['id']
+
+
+@check('AI review: started must be confirmed with the right token and is idempotent')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
+    bus, sessions = fresh_review_bus('started-auth')
+    original = harness.Client
+    harness.Client = FakeClient
+    try:
+        tid = _review_task(bus, sessions, ['started'])
+        token = bus.load(tid)['aiReview']['token']
+        raises(lambda: bus.ai_review('claude', tid, 0, token, 'started'), 'DeepSeek')
+        raises(lambda: bus.ai_review('deepseek', tid, 0, 'wrong', 'started'), '令牌')
+        raises(lambda: bus.ai_review('deepseek', tid, 5, token, 'started'), '序号')
+        first = bus.ai_review('deepseek', tid, 0, token, 'started')
+        assert first['status'] == 'started', first
+        r = bus.load(tid)['aiReview']
+        assert r['status'] == 'started' and r['startedAt'], r
+        again = bus.ai_review('deepseek', tid, 0, token, 'started')
+        assert again.get('duplicate') is True, again                  # repeated confirmation changes nothing
+        # `sent` alone never means started: the stored status is the proof, and it is 'started' only now.
+        before = bus.load(tid)['aiReview']
+        assert before['status'] == 'started' and 'sentAt' in before
+    finally:
+        harness.Client = original
+        bus.review('codex', tid, 'cancel', 'test cleanup')
+
+
+@check('AI review: a sent prompt that is never confirmed retries on a bounded backoff, then stalls')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
+    bus, sessions = fresh_review_bus('backoff')
+    original = harness.Client
+    harness.Client = FakeClient
+    try:
+        tid = _review_task(bus, sessions, ['backoff'])
+        r = bus.load(tid)['aiReview']
+        assert r['status'] == 'sent' and r['attempts'] == 1, r      # the budget is charged when the lease is taken
+        # Inside AI_START_TIMEOUT a pending prompt is left alone, even if a tick runs.
+        bus.pump()
+        assert bus.load(tid)['aiReview']['status'] == 'sent'
+        assert len(FakeClient.prompts) == 1
+        # Past the timeout the same requestId is resent once, never a fresh one.
+        _fake_clock(bus, AI_START_TIMEOUT + 5)
+        bus.pump()
+        r = bus.load(tid)['aiReview']
+        assert r['status'] == 'sent' and r['attempts'] == 2, r     # charged at claim time, monotonic
+        assert len(FakeClient.prompts) == 2
+        assert {p['requestId'] for p in FakeClient.prompts} == {r['requestId']}
+        # A resend right away waits for the next window: a fresh sentAt means the timeout has to pass again.
+        bus.pump()
+        assert bus.load(tid)['aiReview']['attempts'] == 2
+        assert len(FakeClient.prompts) == 2
+        # Drive it to the limit: attempts keep growing, then the task is stalled for a human, never accepted.
+        for _ in range(AI_RETRY_LIMIT + 2):
+            _fake_clock(bus, AI_START_TIMEOUT + AI_RETRY_MAX + 5)
+            bus.pump()
+            if bus.load(tid)['aiReview']['status'] == 'stalled': break
+        r = bus.load(tid)['aiReview']
+        assert r['status'] == 'stalled' and r.get('stalled') is True, r
+        assert r['attempts'] == AI_RETRY_LIMIT, r          # the cap is exact: the counter stops at the limit
+        assert bus.load(tid)['state'] == 'ai_review'                  # never silently accepted
+        assert all(p['requestId'] == r['requestId'] for p in FakeClient.prompts)
+    finally:
+        harness.Client = original
+        bus.review('codex', tid, 'cancel', 'test cleanup')
+
+
+@check('AI review: a started review that goes quiet is flagged stalled, and manual retry is allowed')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
+    bus, sessions = fresh_review_bus('stall-started')
+    original = harness.Client
+    harness.Client = FakeClient
+    try:
+        tid = _review_task(bus, sessions, ['stall'])
+        token = bus.load(tid)['aiReview']['token']
+        bus.ai_review('deepseek', tid, 0, token, 'started')
+        _fake_clock(bus, AI_STALL_SECONDS + 60)
+        bus.pump()
+        r = bus.load(tid)['aiReview']
+        assert r['status'] == 'stalled' and r['stalled'] is True, r     # started but no verdict for too long
+        assert bus.load(tid)['state'] == 'ai_review'
+        # A manual retry clears the stall and resends once with the same requestId.
+        out = bus.release(tid)
+        assert out['aiReview'] == 'started', out
+        assert len(FakeClient.prompts) == 1
+        assert bus.load(tid)['aiReview']['requestId'] == r['requestId']
+    finally:
+        harness.Client = original
+        bus.review('codex', tid, 'cancel', 'test cleanup')
+
+
+@check('AI review: crash recovery picks up sending/sent/failed records left behind')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
+    bus, sessions = fresh_review_bus('recovery')
+    original = harness.Client
+    harness.Client = FakeClient
+    try:
+        # A process died mid-send: the record says sending with an expired lease.
+        tid = _review_task(bus, sessions, ['recover-sending'])
+        task = bus.load(tid)
+        task['aiReview'].update(status='sending', lease='2000-01-01T00:00:00+00:00')
+        bus.save(task)
+        FakeClient.prompts = []
+        bus.pump()
+        assert bus.load(tid)['aiReview']['status'] == 'sent', bus.load(tid)['aiReview']
+        assert len(FakeClient.prompts) == 1
+
+        # A legacy failure record with no nextRetryAt must be retried, not dropped.
+        tid2 = _review_task(bus, sessions, ['recover-failed'], 'Legacy')
+        task = bus.load(tid2)
+        task['aiReview'].update(status='failed', error='old record')
+        task['aiReview'].pop('nextRetryAt', None)
+        bus.save(task)
+        FakeClient.prompts = []
+        bus.pump()
+        assert bus.load(tid2)['aiReview']['status'] in ('sent', 'failed'), bus.load(tid2)['aiReview']
+        assert len(FakeClient.prompts) == 1
+    finally:
+        harness.Client = original
+        bus.review('codex', tid, 'cancel', 'test cleanup')
+        bus.review('codex', tid2, 'cancel', 'test cleanup')
+
+
+@check('AI review: a lease blocks concurrent sends, and an old reply cannot overwrite a newer state')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
+    bus, sessions = fresh_review_bus('race')
+    original = harness.Client
+    harness.Client = FakeClient
+    try:
+        tid = _review_task(bus, sessions, ['race'])
+        task = bus.load(tid)
+        # Simulate a second process holding a fresh lease.
+        task['aiReview'].update(status='sending', lease=__import__('agentlink.util', fromlist=['now']).now())
+        bus.save(task)
+        FakeClient.prompts = []
+        claim, why = bus.ai_review_claim(tid, 0)
+        assert claim is None and why == 'busy', (claim, why)          # the loser of the race must stand down
+        bus.ai_review_send(tid)
+        assert len(FakeClient.prompts) == 0, FakeClient.prompts
+
+        # An old clip for a cancelled task is refused and the task stays cancelled.
+        token = bus.load(tid)['aiReview']['token']
+        bus.review('codex', tid, 'cancel', 'poster cancelled')
+        try:
+            bus.ai_review('deepseek', tid, 0, token, 'accept')
+        except ValueError as error:
+            assert '过期' in str(error), error
+        else:
+            raise AssertionError('expected the stale reply to be refused')
+        assert bus.load(tid)['state'] == 'cancelled'
+    finally:
+        harness.Client = original
+
+
+@check('AI review: a started reply that lands inside the RPC wins over the send result')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
+    bus, sessions = fresh_review_bus('inrpc-started')
+    original = harness.Client
+    started_inside = []
+
+    class StartedInsideRpc(FakeClient):
+        """The reviewer answers on the same tick: `started` lands while the send call is still in flight."""
+        def call(self, method, request):
+            if method == 'session.prompt':
+                tid = started_inside[0]
+                rec = bus.load(tid)['aiReview']
+                bus.ai_review('deepseek', tid, rec['attempt'], rec['token'], 'started')
+                return {'accepted': True}
+            return FakeClient.call(self, method, request)
+
+    harness.Client = StartedInsideRpc
+    try:
+        tid = _review_task(bus, sessions, ['inrpc'])
+        started_inside.append(tid)
+        # Re-drive the send so the fake reviewer can confirm `started` during the RPC.
+        task = bus.load(tid)
+        task['aiReview'].update(status='failed', nextRetryAt=None, lease=None, leaseId=None)
+        bus.save(task)
+        bus.ai_review_send(tid)
+        r = bus.load(tid)['aiReview']
+        assert r['status'] == 'started', r                             # the send result must not overwrite it
+        assert r['startedAt'] and not r.get('leaseId'), r
+    finally:
+        harness.Client = original
+        bus.review('codex', tid, 'cancel', 'test cleanup')
+
+
+@check('AI review: a send failure after the reviewer started cannot roll the review back')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
+    bus, sessions = fresh_review_bus('inrpc-fail')
+    original = harness.Client
+    started_inside = []
+
+    class FailAfterStarted(FakeClient):
+        """`started` lands first, then the same RPC raises: the failure must not mark it failed/uncertain."""
+        def call(self, method, request):
+            if method == 'session.prompt':
+                tid = started_inside[0]
+                rec = bus.load(tid)['aiReview']
+                bus.ai_review('deepseek', tid, rec['attempt'], rec['token'], 'started')
+                raise OSError('bridge dropped after accepting')
+            return FakeClient.call(self, method, request)
+
+    harness.Client = FailAfterStarted
+    try:
+        tid = _review_task(bus, sessions, ['inrpc-fail'])
+        started_inside.append(tid)
+        task = bus.load(tid)
+        task['aiReview'].update(status='failed', nextRetryAt=None, lease=None, leaseId=None)
+        bus.save(task)
+        bus.ai_review_send(tid)
+        r = bus.load(tid)['aiReview']
+        assert r['status'] == 'started', r
+        assert not r.get('error'), r                                   # no failure recorded over a running review
+    finally:
+        harness.Client = original
+        bus.review('codex', tid, 'cancel', 'test cleanup')
+
+
+@check('AI review: a manual retry cannot clear a live lease or a started review')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    write_json(DSH / 'storages' / 'workspace.json', {'global': {'archivedSessionIds': []}})
+    bus, sessions = fresh_review_bus('manual-guard')
+    original = harness.Client
+    harness.Client = FakeClient
+    try:
+        from agentlink.util import now as stamp
+        # 1. A live lease belongs to another sender: a manual retry must not clear it or send again.
+        tid = _review_task(bus, sessions, ['guard-lease'])
+        task = bus.load(tid)
+        task['aiReview'].update(status='sending', lease=stamp(), leaseId='other-process')
+        bus.save(task)
+        FakeClient.prompts = []
+        out = bus.release(tid)
+        assert out['aiReview'] in ('busy', 'sending'), out
+        r = bus.load(tid)['aiReview']
+        assert r['status'] == 'sending' and r['leaseId'] == 'other-process', r
+        assert len(FakeClient.prompts) == 0, FakeClient.prompts
+
+        # 2. A started review is running: a manual retry must not reset it to pending or re-send.
+        token = bus.load(tid)['aiReview']['token']
+        bus.ai_review('deepseek', tid, 0, token, 'started')
+        FakeClient.prompts = []
+        out = bus.release(tid)
+        assert out['aiReview'] == 'started', out
+        assert bus.load(tid)['aiReview']['status'] == 'started'
+        assert len(FakeClient.prompts) == 0, FakeClient.prompts
+    finally:
+        harness.Client = original
+        bus.review('codex', tid, 'cancel', 'test cleanup')
+
+
+@check('AI review: stale stall snapshots preserve new leases and started callbacks; exhausted manual resume is bounded')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    workspace_file()
+    bus, sessions = fresh_review_bus('final-races')
+    original = harness.Client
+    harness.Client = FakeClient
+    try:
+        tid = _review_task(bus, sessions, ['races'])
+        task = bus.load(tid)
+        task['aiReview'].update(attempts=AI_RETRY_LIMIT, sentAt='2000-01-01T00:00:00+00:00')
+        bus.save(task)
+        stale = bus.load(tid)
+        token = task['aiReview']['token']
+        bus.ai_review('deepseek', tid, 0, token, 'started')
+        bus.pump_ai_review(stale)
+        assert bus.load(tid)['aiReview']['status'] == 'started'
+        bus.review('codex', tid, 'cancel', 'cleanup')
+        tid = _review_task(bus, sessions, ['resume'])
+        task = bus.load(tid)
+        task['aiReview'].update(attempts=AI_RETRY_LIMIT, sentAt='2000-01-01T00:00:00+00:00')
+        bus.save(task)
+        bus.pump()
+        assert bus.load(tid)['aiReview']['status'] == 'stalled'
+        assert bus.release(tid)['aiReview'] == 'sent'
+        assert bus.load(tid)['aiReview']['attempts'] == AI_RETRY_LIMIT + 1
+        bus.pump()
+        assert bus.load(tid)['aiReview']['status'] == 'sent'
+        task = bus.load(tid)
+        task['aiReview'].update(status='sending', leaseId='new-owner', lease=__import__('agentlink.util', fromlist=['now']).now())
+        bus.save(task)
+        assert not bus._ai_review_stall(tid, 0, 'stale snapshot')
+        assert not bus._ai_review_mark(tid, 0, 'old-owner', 'sent')
+        assert bus.load(tid)['aiReview']['leaseId'] == 'new-owner'
+        bus.review('codex', tid, 'cancel', 'cleanup')
+    finally:
+        harness.Client = original
+
+
+@check('AI review: cancellation during session preflight prevents prompt delivery')
+def _():
+    os.environ.pop('AGENTLINK_NO_DISPATCH', None)
+    workspace_file()
+    bus, sessions = fresh_review_bus('preflight-cancel')
+    original = harness.Client
+    harness.Client = FakeClient
+    try:
+        tid = _review_task(bus, sessions, ['preflight'])
+        task = bus.load(tid)
+        task['aiReview'].update(status='failed', nextRetryAt=None)
+        bus.save(task)
+        class CancelClient(FakeClient):
+            def call(self, method, request):
+                if method == 'session.list':
+                    bus.review('codex', tid, 'cancel', 'cancel during preflight')
+                return super().call(method, request)
+        harness.Client = CancelClient
+        FakeClient.prompts = []
+        assert bus.ai_review_send(tid) == 'stale'
+        assert FakeClient.prompts == []
+        assert bus.load(tid)['state'] == 'cancelled'
     finally:
         harness.Client = original
 

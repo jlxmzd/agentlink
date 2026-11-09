@@ -23,6 +23,48 @@ def claude_dir_name(path):
     return re.sub(r'[^A-Za-z0-9]', '-', os.path.abspath(str(path)))
 
 
+def claude_execution(cwd, sid, since):
+    """True=unfinished turn, False=explicit end after claim, None=unknown.
+
+    Only inspect the bound session's transcript metadata. Never classify from message wording, file age,
+    missing files or a transport error. A later user/tool-use row supersedes an earlier end_turn.
+    """
+    if not re.fullmatch(r'[0-9a-fA-F-]{36}', sid or ''): return None
+    try: started = datetime.datetime.fromisoformat(since).timestamp()
+    except (TypeError, ValueError): return None
+    base = user_home() / '.claude' / 'projects'
+    wanted = claude_dir_name(cwd)
+    if not base.is_dir(): return None
+    files = [d / (sid + '.jsonl') for d in base.iterdir()
+             if d.is_dir() and (d.name == wanted or d.name.startswith(wanted + '-')) and (d / (sid + '.jsonl')).is_file()]
+    if len(files) != 1: return None
+    status = None
+    try:
+        with files[0].open(encoding='utf-8') as stream:
+            for line in stream:
+                if not line.strip(): continue
+                row = json.loads(line)
+                if not isinstance(row, dict): return None
+                if row.get('isSidechain'): continue
+                if row.get('type') not in ('user', 'assistant'): continue
+                if row.get('sessionId') and row['sessionId'] != sid: continue
+                if row.get('cwd') and not contains(cwd, row['cwd']): return None
+                try: stamp = datetime.datetime.fromisoformat(str(row.get('timestamp') or '').replace('Z', '+00:00')).timestamp()
+                except (TypeError, ValueError): return None
+                if stamp < started: continue
+                if row['type'] == 'user':
+                    status = True
+                else:
+                    message = row.get('message') or {}
+                    if not isinstance(message, dict): return None
+                    stop = message.get('stop_reason')
+                    if stop in ('end_turn', 'stop_sequence'): status = False
+                    elif stop in (None, 'tool_use'): status = True
+                    else: status = None
+    except (OSError, ValueError): return None
+    return status
+
+
 def claude_sessions(cwd, include_all=False, limit=40):
     base = user_home() / '.claude' / 'projects'
     if not base.is_dir(): return []

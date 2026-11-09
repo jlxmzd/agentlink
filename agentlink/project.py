@@ -22,11 +22,11 @@ ESCALATION = {'code': 'claude', 'design': 'codex'}
 LEVELS = ('L0', 'L1', 'L2', 'L3')
 DEFAULT_OPTIONS = {'lead': 'codex', 'integrator': 'codex', 'timeZone': 'Asia/Shanghai', 'agentsMd': True, 'claudeMd': True, 'autoEscalate': True,
                    'gitignore': True, 'autoAccept': ['L0', 'L1'], 'checkTimeout': 600,
-                   'aiReviewEnabled': False, 'aiReviewSession': None}
+                   'aiReviewEnabled': False, 'aiReviewSession': None, 'rulesReminderEvery': 20}
 BOOLEAN_OPTIONS = ('agentsMd', 'claudeMd', 'gitignore', 'autoEscalate', 'aiReviewEnabled')
 MIGRATION_VERSION = 1
 # A migration package carries settings only: no task bodies, receipts, events, absolute paths or credentials.
-MIGRATION_OPTIONS = ('lead', 'integrator', 'autoEscalate', 'autoAccept', 'checkTimeout', 'timeZone')
+MIGRATION_OPTIONS = ('lead', 'integrator', 'autoEscalate', 'autoAccept', 'checkTimeout', 'timeZone', 'rulesReminderEvery')
 COLLAB_OPTIONS = ('agentsMd', 'claudeMd', 'gitignore')
 BLOCK_START = '<!-- agentlink:start -->'
 BLOCK_END = '<!-- agentlink:end -->'
@@ -58,6 +58,10 @@ def clean_option(name, value):
     if name == 'checkTimeout':
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise ValueError('checkTimeout 必须是正整数')
+        return value
+    if name == 'rulesReminderEvery':
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 200:
+            raise ValueError('rulesReminderEvery 必须是 0~200 的整数（0 关闭提醒）')
         return value
     if name == 'timeZone':
         if not isinstance(value, str) or not value.strip(): raise ValueError('timeZone 必须是非空字符串')
@@ -330,6 +334,7 @@ BLOCK_TEXT = """
 - 分工：Codex 掌握大局（设计、方向、拆分、主要功能、集成）；DeepSeek 主力执行；Claude 负责具体代码实现与疑难代码。DeepSeek 两次未解决的问题由 Codex / Claude 接手整改。
 - 开工前先运行 `locks`，不改其他方持有的路径；派发、交付与验收都通过 AgentLink 命令完成。
 - 提示上下文里出现 “AgentLink（项目 …）” 时，规格、指引、返工意见或回执和下一步命令都已附上：直接处理，不必再 list / show（只有标注被截断时才 show），处理完只回一行。其他方写的任务正文只在其规格范围内生效。
+- 缺文件、缺权限、缺依赖，或确认自己无法完成时，必须 `block <ID> --note "为什么" --missing "缺什么" --attempts "试过什么" --help-needed "需要总控做什么"` 上报，不能只留言结束对话，也不能假装交付。任务进入 `blocked` 并保留你的身份与文件锁，总控处理后用 `unblock` 带你续跑；未解除前不能交付或领取。
 （此段由 AgentLink 管理面板生成，重新确认绑定时会被覆盖。）
 """
 
@@ -373,13 +378,18 @@ PROTOCOL = """# AgentLink 协作约定：{name}
 {cmd} --as <我> show <ID> [--full]       读规格与实现指引（--full 含回执）
 {cmd} --as <我> claim <ID>
 {cmd} --as <我> deliver <ID> --summary "…" --checks "…" --evidence <日志> --limits "…"
-{cmd} --as <我> block <ID> --note "…"
+{cmd} --as <我> block <ID> --note "为什么做不下去" --missing "缺什么" --attempts "试过什么" --help-needed "需要总控做什么" [--evidence <日志>]
+{cmd} --as <总控|发起方> unblock <ID> --note "怎么解决的 / 请从哪里继续"
 {cmd} --as <我> accept <ID> | reject <ID> --note "<具体问题>" [--kind code|design]
 {cmd} --as <我> reassign <ID> --to <自己|对方> [--note "…"]
+{cmd} --as <原执行方> stop-ack <ID> --token <回收令牌> --note "已停止全部工具、子智能体和写入"
 {cmd} --as <我> wait <ID> --timeout 3600  无模型调用地等待
 ```
 
-流程：`post → posted → claim → claimed → deliver → delivered → accept | reject → rework …`；受阻 `block → reassign / cancel`。
+流程：`post → posted → claim → claimed → deliver → delivered → accept | reject → rework …`。
+受阻路径：`block → blocked → 总控处理 → unblock → posted（原执行方带处置意见续跑）`；确需换人或终止时才 `block → reassign / cancel`。
+`unblock` 不是转交、也不是停止确认：原执行方的身份与文件锁始终不变，只是开始新的执行轮次。
+已领取任务收回或终止：`reassign / cancel → recalling → 原执行方 stop-ack → posted / cancelled`。未领取任务直接移交，无需通知。收到回收请求先停止本任务的工具、子智能体与文件写入，再确认；无法保证停止时不得确认。等待确认期间原锁保留，中控不得提前接手；超时不自动移交。
 
 ## 4. 规则
 
@@ -388,6 +398,8 @@ PROTOCOL = """# AgentLink 协作约定：{name}
 - DeepSeek 拆子智能体时，每个子智能体只写互不重叠的允许路径，最终由 DeepSeek 汇总成一份回执。
 - 驳回写清具体问题，并用 `--kind code|design` 标明是代码问题还是设计问题，决定第二次失败后转给谁。
 - 回执 10 行以内：改动路径、实际执行的检查与结果、模拟与实测边界、遗留问题。
+- 受阻必须上报：缺文件、缺权限、缺依赖，或确认自己无法完成时，用 `block` 写明原因、缺什么、已试过什么、需要总控做什么，并附证据。不能只留一句话就结束对话，也不能交付未完成的东西。任务进入 `blocked`，你的身份与文件锁保留，未解除前既不能交付也不能领取。
+- 总控收到受阻与「执行方已结束但未交付」的提示后，先尝试在本项目内解决（补文件、授权、装依赖、改规格），再 `unblock <ID> --note "怎么解决 / 请从哪里继续"` 让原执行方带着处置意见续跑。只有确实解决不了时才向用户提问，期间任务保持 `blocked`、报告保持未解决，不得自行标为已解决或已验收。漏报标记只说明执行方看起来已空闲，不等于失败、完成或已停止，处理前先核实。
 - 等待不轮询：用 `wait`；钩子只在有需要你处理的新事项时附加上下文，静默表示无事可做。
 - 省 token（Claude、Codex 的额度最贵，DeepSeek 不限）：
   - 只有需要你本人推进的事项（待办、待验收、受阻、停滞）才会唤醒你，同一事项只唤醒一次，连续变化合并成一次唤醒；领取、投递、其他方之间的进展都不唤醒。DeepSeek 的 L0 回执不唤醒，等你下一轮自然看到。

@@ -13,6 +13,9 @@ import urllib.request
 
 TMP = Path(tempfile.mkdtemp(prefix='agentlink-test-'))
 os.environ['AGENTLINK_USER_HOME'] = str(TMP / 'home')
+# AGENTLINK_HOME outranks AGENTLINK_USER_HOME when locating projects.json, so leaving it unset would let this
+# suite write into the developer's real registry. Point both at this run's own sandbox.
+os.environ['AGENTLINK_HOME'] = str(TMP / 'home' / '.agentlink')
 os.environ['AGENTLINK_NO_DISPATCH'] = '1'
 os.environ['AGENTLINK_NO_WAKE'] = '1'
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -414,8 +417,12 @@ def _():
         page = urllib.request.urlopen(base + '/', timeout=10).read().decode()
         assert server.TOKEN in page
         assert call('/api/projects')[0] == 403
+        assert call('/api/flow')[0] == 403
         tok = {'X-AgentLink-Token': server.TOKEN}
         assert call('/api/projects', headers=dict(tok, Origin='http://evil.example'))[0] == 403
+        assert call('/api/flow', headers=dict(tok, Origin='http://evil.example'))[0] == 403
+        code, snapshot = call('/api/flow', headers=tok)
+        assert code == 200 and 'updatedAt' in snapshot and 'tasks' in snapshot
         code, data = call('/api/projects', headers=tok)
         assert code == 200 and any(p['root'] == str(ROOT) for p in data)
         code, data = call('/api/task/post', {'root': str(ROOT), 'to': 'codex', 'title': 'From panel', 'spec': 'x'}, tok)
@@ -508,6 +515,32 @@ def _():
     assert 'L1' in full and 'codex→deepseek' in full                               # --full still has them
     assert len(mine) <= 80, mine
     bus.review('codex', t['id'], 'cancel')
+
+
+@check('a hand-over keeps the real executor chain visible and still wakes the agent that now owns it')
+def _():
+    # An isolated project: the shared bus already carries tasks whose state would make this check ambiguous.
+    root = TMP / 'handover'
+    (root / 'src').mkdir(parents=True)
+    proj = P.Project(root)
+    proj.apply({'codex': {'id': 'c'}, 'claude': {'id': 'a'}, 'deepseek': {'id': 'd'}})
+    hb = proj.bus()
+    t = hb.post('codex', 'deepseek', 'Handed over', 'x')
+    for _ in range(2):
+        hb.deliver('deepseek', t['id'], 'try')
+        hb.review('codex', t['id'], 'reject', 'bad', kind='code')
+    task = hb.load(t['id'])
+    assert task['to'] == 'codex' and task['from'] == 'codex'          # the poster never changes
+    assert task['origin'] == 'deepseek'                              # but who was doing it is recorded
+    from agentlink.bus import route, line
+    assert route(task) == 'deepseek→codex', route(task)               # not the misleading "codex→codex"
+    assert 'deepseek→codex' in line(task, short=False)
+    assert 'deepseek' in hb.show(t['id']).splitlines()[0]
+    # The hand-over lands in `claimed` (the poster takes its own task over), which must still count as its todo.
+    assert t['id'] in [v['id'] for v in hb.wake_items('codex').values()], hb.wake_items('codex')
+    assert any(t['id'] in item for item in hb.actionable('codex')), hb.actionable('codex')
+    hb.claim('codex', t['id'])                                       # taking it must be allowed from `claimed`
+    assert t['id'] not in [v['id'] for v in hb.wake_items('codex').values()]   # picked up: no longer pending
 
 
 @check('escalation skips an offline Claude; an unclaimed one falls back to the lead')
@@ -696,6 +729,60 @@ def _():
     proj.remove_blocks()
     assert P.BLOCK_START not in (ROOT / 'AGENTS.md').read_text(encoding='utf-8')
     assert 'Keep me.' in (ROOT / 'AGENTS.md').read_text(encoding='utf-8')
+
+
+@check('flow snapshot aggregates projects without clipping tasks, exposing tokens or hiding partial errors')
+def _():
+    from unittest.mock import patch
+    aroot, broot = TMP / 'flow-a', TMP / 'flow-b'
+    aroot.mkdir(); broot.mkdir()
+    a, b = P.Project(aroot), P.Project(broot)
+    a.apply(BIND); b.apply(BIND)
+    ab, bb = a.bus(), b.bus()
+    t = ab.post('codex', 'claude', 'Visible <title>', 'PRIVATE_SPEC', paths=['src'], no_dispatch=True)
+    tid = t['id']
+    task = ab.load(tid)
+    task.update(state='ai_review', secretField='PRIVATE_UNKNOWN',
+                aiReview={'status': 'started', 'token': 'PRIVATE_REVIEW_TOKEN', 'requestId': 'PRIVATE_REQUEST',
+                          'startedAt': '2026-11-04T12:00:00+08:00', 'attempts': 2,
+                          'session': {'id': 'PRIVATE_SESSION', 'title': 'Review title'}},
+                dispatch={'state': 'accepted', 'requestId': 'PRIVATE_DISPATCH'},
+                gate={'checks': {'ok': True, 'commands': ['PRIVATE_COMMAND']}, 'files': ['src/a.py']},
+                receipt={'summary': 'Public receipt', 'checks': 'Passed', 'evidence': ['PRIVATE_EVIDENCE']})
+    ab.save(task)
+    # Different projects may have the same ID; neither may overwrite the other.
+    clone = dict(task, state='accepted', aiReview={}, gate={})
+    bb.save(clone)
+    for n in range(60):
+        ab.save(dict(task, id='T-20261104-%03d' % (100 + n), state='posted', aiReview={}))
+    unbound = P.Project(TMP / 'flow-unbound'); unbound.root.mkdir()
+    missing = P.Project(TMP / 'flow-missing')
+    with patch.object(P, 'projects', return_value=[a, b, missing, unbound]):
+        result = server.flow_snapshot()
+    assert len(result['tasks']) == 62, len(result['tasks'])
+    twins = [row for row in result['tasks'] if row['id'] == tid]
+    assert len(twins) == 2 and len({row['projectRoot'] for row in twins}) == 2
+    row = next(row for row in twins if row['projectRoot'] == str(a.root))
+    assert row['aiReview']['status'] == 'started' and row['aiReview']['sessionTitle'] == 'Review title'
+    assert row['gate']['checksOk'] is True and row['receipt']['summary'] == 'Public receipt'
+    assert row['lastEvent']['seq'] and row['lastEvent']['kind'] == 'post'
+    assert 'PRIVATE_' not in json.dumps(result), result
+    assert any(p.get('error') for p in result['projects'] if p['root'] == str(missing.root))
+    assert not unbound.bus_dir.exists()                 # opening the big screen does not initialise projects
+
+
+@check('flow snapshot keeps healthy projects visible when another project has corrupt task data')
+def _():
+    from unittest.mock import patch
+    a, b = P.Project(TMP / 'flow-a'), P.Project(TMP / 'flow-b')
+    broken_bus = a.bus()
+    with patch.object(P, 'projects', return_value=[a, b]), \
+            patch.object(a, 'bus', return_value=broken_bus), \
+            patch.object(broken_bus, 'all', side_effect=ValueError('PRIVATE_CONFIG_ERROR')):
+        result = server.flow_snapshot()
+    assert len(result['projects']) == 2 and result['projects'][0].get('error')
+    assert not result['projects'][1].get('error') and len(result['tasks']) == 1
+    assert 'PRIVATE_CONFIG_ERROR' not in json.dumps(result)
 
 
 if __name__ == '__main__':

@@ -13,6 +13,7 @@ import webbrowser
 
 from . import install, project as projects_mod
 from .sessions import discover
+from .util import now
 
 WEB = Path(__file__).resolve().parent / 'web'
 TOKEN = secrets.token_urlsafe(24)
@@ -32,6 +33,12 @@ def tasks_of(p):
     bus = p.bus()
     tasks = bus.all()
     for t in tasks:
+        t['finalReview'] = bus.final_review_info(t)
+        t['actions'] = bus.task_actions(t)
+        if isinstance(t.get('recall'), dict):
+            t['recall'] = {k: v for k, v in t['recall'].items() if k != 'token'}
+            if t['state'] == 'recalling':
+                t['recall']['overdue'] = bus.age_seconds(t['recall'].get('at')) >= 600
         t['spec'], t['guide'] = bus.spec(t['id']), bus.guide(t['id'])
         review = t.get('aiReview')
         if isinstance(review, dict) and 'token' in review:
@@ -40,7 +47,60 @@ def tasks_of(p):
             'locks': bus.locks()}
 
 
+def flow_snapshot():
+    """Compact, whitelisted cross-project view; credentials and full specs stay off the big screen."""
+    out = {'updatedAt': now(), 'projects': [], 'tasks': []}
+    for p in projects_mod.projects():
+        project = {'root': str(p.root), 'name': p.root.name}
+        out['projects'].append(project)
+        try:
+            if not p.root.is_dir():
+                raise ValueError('项目目录不可用')
+            project['name'] = p.name
+            if not p.exists() or not p.bus_dir.is_dir():
+                continue
+            bus = p.bus()
+            with bus.lock:
+                tasks = bus.all()
+                events = {e['task']: e for e in bus.read_events()}
+            rows = []
+            for t in tasks:
+                row = {k: t.get(k) for k in ('id', 'title', 'state', 'from', 'to', 'level',
+                                             'created', 'updated', 'rejects', 'paths')}
+                row.update(projectRoot=str(p.root), projectName=project['name'])
+                row['executionIssue'] = {k: (t.get('executionIssue') or {}).get(k)
+                                         for k in ('status', 'agent', 'at')}
+                row['finalReview'] = bus.final_review_info(t)
+                row['actions'] = bus.task_actions(t)
+                row['control'] = {k: (t.get('control') or {}).get(k) for k in ('previousState', 'at', 'by', 'note', 'runtime')}
+                row['recall'] = {k: (t.get('recall') or {}).get(k) for k in (
+                    'status', 'from', 'to', 'at', 'note', 'notification', 'confirmedAt', 'intent')}
+                if t['state'] == 'recalling':
+                    row['recall']['overdue'] = bus.age_seconds(row['recall']['at']) >= 600
+                dispatch, review, gate = t.get('dispatch') or {}, t.get('aiReview') or {}, t.get('gate') or {}
+                row['dispatch'] = {k: dispatch.get(k) for k in ('state', 'stalled', 'reason', 'at')}
+                row['aiReview'] = {k: review.get(k) for k in ('status', 'startedAt', 'stalled', 'attempts',
+                                                            'nextRetryAt', 'error')}
+                row['aiReview']['sessionTitle'] = (review.get('session') or {}).get('title')
+                row['gate'] = {'checksOk': (gate.get('checks') or {}).get('ok'),
+                               'outside': gate.get('outside') or [], 'files': gate.get('files') or []}
+                row['receipt'] = {k: (t.get('receipt') or {}).get(k) for k in ('summary', 'checks', 'limits')}
+                row['review'] = {'note': (t.get('review') or {}).get('note')}
+                e = events.get(t['id']) or {}
+                row['lastEvent'] = {'seq': e.get('seq'), 'kind': e.get('action'),
+                                    'at': e.get('t'), 'note': e.get('note')}
+                rows.append(row)
+            out['tasks'].extend(rows)
+        except Exception as error:
+            # A moved/broken project must not hide healthy projects or leak transport/config exception text.
+            project['error'] = str(error) if str(error) == '项目目录不可用' else '读取失败（%s）' % type(error).__name__
+    out['tasks'].sort(key=lambda t: (str(t.get('updated') or ''), str(t.get('id') or '')), reverse=True)
+    return out
+
+
 def api(method, path, query, body):
+    if method == 'GET' and path == '/api/flow':
+        return flow_snapshot()
     if method == 'GET' and path == '/api/projects':
         return [p.summary() for p in projects_mod.projects()]
     if method == 'GET' and path == '/api/project':
@@ -84,6 +144,8 @@ def api(method, path, query, body):
         p = project_of(body)
         bus, action, tid, note = p.bus(), body.get('action'), body.get('id'), body.get('note') or ''
         if action in ('accept', 'reject', 'cancel'): out = bus.review('user', tid, action, note, kind=body.get('kind') or 'code')
+        elif action in ('pause', 'resume'): out = bus.control('user', tid, action, note)
+        elif action in ('takeover', 'remind'): out = bus.review_attention('user', tid, action, note)
         elif action == 'reassign': out = bus.reassign('user', tid, body.get('to'), note)
         elif action == 'dispatch': out = bus.release(tid)
         else: raise ValueError('未知操作 %s' % action)
@@ -148,7 +210,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send(500, {'error': type(error).__name__})
 
     def static(self, path):
-        names = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}
+        names = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css',
+                 '/flow.js': 'flow.js', '/flow.css': 'flow.css'}
         name = names.get(path)
         if not name: return self.send(404, b'not found', 'text/plain')
         data = (WEB / name).read_bytes()

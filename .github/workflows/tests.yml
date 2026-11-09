@@ -30,5 +30,12 @@ jobs:
           node-version: '24'
       - run: python -I tests/test_agentlink.py
       - run: python -I tests/test_harness.py
+      - run: python -I tests/test_isolation.py
+      - run: python -I tests/test_blockers.py
+      - run: python -I tests/test_notifications.py
+      - run: python -I tests/test_task_control.py
       - run: node --check agentlink/web/app.js
+      - run: node --check agentlink/web/flow.js
       - run: node --check hosts/harness/agentlink-bridge.mjs
+      - run: node tests/test_panel.js
+      - run: node tests/test_flow.js

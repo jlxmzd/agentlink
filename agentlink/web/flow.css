@@ -1,0 +1,366 @@
+/* AgentLink flow board: a dense task console built on the page's own theme tokens.
+ *
+ * The board must look like part of the panel, not a separate dark product: every colour below resolves to the
+ * host's `--bg / --panel / --ink / --muted / --line / --accent / --warn / --bad / --ok` (plus the optional
+ * `--accent-soft / --hover / --shadow-sm`). Falling back to a neutral local value keeps the board usable when it
+ * is mounted alone, but nothing here hardcodes a dark palette.
+ *
+ * Every selector is `flow-` prefixed so mounting it next to the panel never leaks into it.
+ */
+
+.flow-container {
+  --flow-bg: var(--bg, #f5f4f0);
+  --flow-panel: var(--panel, #fff);
+  --flow-ink: var(--ink, #1d1d1b);
+  --flow-muted: var(--muted, #6b6a64);
+  --flow-line: var(--line, #e2e0d8);
+  --flow-accent: var(--accent, #2f5d50);
+  --flow-accent-soft: var(--accent-soft, color-mix(in srgb, var(--accent, #2f5d50) 14%, transparent));
+  --flow-warn: var(--warn, #9a5b00);
+  --flow-bad: var(--bad, #a3312a);
+  --flow-ok: var(--ok, #2f6b3a);
+  --flow-hover: var(--hover, color-mix(in srgb, var(--ink, #1d1d1b) 6%, transparent));
+  --flow-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, .08));
+  width: 100%;
+  color: var(--flow-ink);
+  background: var(--flow-bg);
+  font: 13px/1.45 "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  box-sizing: border-box;
+}
+.flow-container *,
+.flow-container *::before,
+.flow-container *::after { box-sizing: border-box; }
+
+.flow-root {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 100%;
+  padding: 14px 18px 22px;
+  gap: 10px;
+  background: var(--flow-bg);          /* no separate deep-blue backdrop, no gradient decoration */
+}
+.flow-root:fullscreen { width: 100vw; height: 100vh; overflow: auto; padding: 18px 22px 28px; }
+
+/* -- header: one or two tight lines, then a toolbar line --------------------- */
+.flow-head { display: flex; flex-direction: column; gap: 6px; }
+.flow-titleline { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.flow-title { font-size: 16px; font-weight: 650; letter-spacing: .01em; }
+.flow-meta { color: var(--flow-muted); font-size: 12px; }
+.flow-stats { display: flex; gap: 6px; flex-wrap: wrap; }
+.flow-chip {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  background: var(--flow-panel); border: 1px solid var(--flow-line); border-radius: 7px;
+  padding: 2px 9px; box-shadow: var(--flow-shadow);
+}
+.flow-chip-num { font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; }
+.flow-chip-label { color: var(--flow-muted); font-size: 11.5px; }
+
+.flow-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.flow-select, .flow-search, .flow-btn {
+  background: var(--flow-panel); color: var(--flow-ink);
+  border: 1px solid var(--flow-line); border-radius: 7px;
+  padding: 4px 9px; font: inherit; font-size: 12.5px; box-shadow: var(--flow-shadow);
+}
+.flow-select { width: auto; min-width: 0; max-width: 240px; flex: 0 1 200px; }
+.flow-search { width: auto; min-width: 200px; flex: 1 1 200px; }
+.flow-btn { cursor: pointer; }
+.flow-btn:hover { border-color: var(--flow-accent); background: var(--flow-hover); }
+.flow-check { display: inline-flex; align-items: center; gap: 5px; color: var(--flow-muted); font-size: 12.5px; white-space: nowrap; }
+.flow-check input { width: auto; margin: 0; flex: none; accent-color: var(--flow-accent); }
+
+.flow-banner { font-size: 12.5px; border-radius: 7px; }
+.flow-banner:empty, .flow-banner.flow-empty-banner { display: none; }
+.flow-stale { padding: 6px 11px; color: var(--flow-bad); border: 1px solid var(--flow-bad); background: var(--flow-panel); }
+.flow-error-note { color: var(--flow-warn); font-size: 12px; }
+.flow-error-note:empty { display: none; }
+
+/* -- the pipeline legend: a real connected chain, not a text table ------------ */
+.flow-legend {
+  display: flex; align-items: center; gap: 0; flex-wrap: wrap;
+  font-size: 11.5px; color: var(--flow-muted); padding: 4px 2px;
+}
+.flow-legend-lead { margin-right: 8px; color: var(--flow-muted); }
+.flow-legend-node { display: inline-flex; align-items: center; gap: 5px; }
+.flow-legend-node::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--flow-line); }
+.flow-legend-arrow { width: 22px; height: 1px; background: var(--flow-line); position: relative; margin: 0 4px; }
+.flow-legend-arrow::after {
+  content: ""; position: absolute; right: -1px; top: 50%; transform: translateY(-50%);
+  border: 3px solid transparent; border-left-color: var(--flow-line);
+}
+.flow-legend-branch { color: var(--flow-warn); }
+.flow-legend-branch::before { background: var(--flow-warn); }
+
+/* -- one compact row: summary | pipeline | status | actions ------------------- */
+.flow-board { flex: 1; min-height: 0; overflow: visible; }
+.flow-root:fullscreen .flow-board { overflow: auto; }
+.flow-lane { display: flex; flex-direction: column; gap: 6px; }
+
+.flow-task {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.5fr) minmax(360px, 3fr) 132px 52px;
+  grid-template-areas: "main chain status acts";
+  align-items: center;
+  column-gap: 12px;
+  min-height: 62px;
+  padding: 7px 11px;
+  background: var(--flow-panel);
+  border: 1px solid var(--flow-line);
+  border-radius: 9px;
+  box-shadow: var(--flow-shadow);
+}
+.flow-task.flow-open { grid-template-areas: "main chain status acts" "facts facts facts facts"; }
+
+.flow-main { grid-area: main; min-width: 0; cursor: pointer; }
+.flow-main:focus-visible { outline: 2px solid var(--flow-accent); outline-offset: 2px; border-radius: 5px; }
+.flow-line1, .flow-line2 { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.flow-task-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.flow-line2 { margin-top: 1px; overflow: hidden; }
+.flow-task-meta { color: var(--flow-muted); font-size: 11.5px; white-space: nowrap; }
+.flow-warn { color: var(--flow-warn); }
+
+/* anomaly is a short badge on the first line */
+.flow-anomaly { font-size: 11px; padding: 0 6px; border-radius: 9px; border: 1px solid var(--flow-line); white-space: nowrap; }
+.flow-anomaly-bad { color: var(--flow-bad); border-color: var(--flow-bad); }
+.flow-anomaly-warn { color: var(--flow-warn); border-color: var(--flow-warn); }
+
+/* the six-stage chain: dots joined by a line, no per-node prose */
+.flow-chain { grid-area: chain; list-style: none; display: flex; align-items: center; margin: 0; padding: 0; min-width: 0; }
+.flow-node { position: relative; display: inline-flex; flex-direction: column; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; }
+.flow-node + .flow-node::before {
+  content: ""; position: absolute; left: -50%; top: 4px; width: 100%; height: 2px; background: var(--flow-line);
+}
+.flow-dot { position: relative; z-index: 1; flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: var(--flow-panel); border: 1px solid var(--flow-line); }
+.flow-node-label { font-size: 11px; color: var(--flow-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* evidence rules: done is solid, "no record" is faint, the future is a dashed outline */
+.flow-node-done .flow-dot { background: var(--flow-accent); border-color: var(--flow-accent); }
+.flow-node-done .flow-node-label { color: var(--flow-ink); }
+.flow-node-done + .flow-node::before { background: var(--flow-accent); }
+.flow-node-active .flow-dot { background: var(--flow-accent); border-color: var(--flow-accent); }
+.flow-node-active .flow-node-label { color: var(--flow-accent); font-weight: 650; }
+.flow-node-pending .flow-dot { border-style: dashed; opacity: .75; }
+.flow-node-pending::before { background: repeating-linear-gradient(90deg, var(--flow-line) 0 4px, transparent 4px 8px); }
+.flow-node-skipped { opacity: .5; }
+.flow-node-skipped .flow-node-label { text-decoration: line-through; text-decoration-color: var(--flow-line); }
+.flow-node-error .flow-dot { background: var(--flow-bad); border-color: var(--flow-bad); }
+.flow-node-error .flow-node-label { color: var(--flow-bad); font-weight: 650; }
+.flow-node-paused .flow-dot, .flow-node-recalling .flow-dot { background: var(--flow-warn); border-color: var(--flow-warn); }
+.flow-node-paused .flow-node-label, .flow-node-recalling .flow-node-label { color: var(--flow-warn); font-weight: 650; }
+
+/* status badge */
+.flow-badge {
+  grid-area: status; justify-self: end; display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11.5px; padding: 1px 8px; border-radius: 9px;
+  border: 1px solid var(--flow-line); color: var(--flow-muted); white-space: nowrap;
+}
+.flow-badge-tone-busy { color: var(--flow-accent); border-color: var(--flow-accent); }
+.flow-badge-tone-warn { color: var(--flow-warn); border-color: var(--flow-warn); }
+.flow-badge-tone-bad { color: var(--flow-bad); border-color: var(--flow-bad); }
+.flow-badge-tone-ok { color: var(--flow-ok); border-color: var(--flow-ok); }
+.flow-badge-tone-muted { color: var(--flow-muted); }
+.flow-badge-tone-paused, .flow-badge-tone-recall { color: var(--flow-warn); border-color: var(--flow-warn); }
+
+/* actions collapse into one small menu; the row never grows a control bar */
+.flow-row-acts { grid-area: acts; display: flex; justify-content: flex-end; }
+.flow-menu { position: relative; }
+.flow-menu-btn {
+  list-style: none; cursor: pointer; user-select: none;
+  border: 1px solid var(--flow-line); border-radius: 7px; padding: 3px 10px;
+  font-size: 12px; color: var(--flow-ink); background: var(--flow-panel); box-shadow: var(--flow-shadow);
+}
+.flow-menu-btn::-webkit-details-marker { display: none; }
+.flow-menu-btn:hover, .flow-menu[open] .flow-menu-btn { border-color: var(--flow-accent); background: var(--flow-hover); }
+.flow-menu:focus-within .flow-menu-btn { outline: 2px solid var(--flow-accent); outline-offset: 2px; }
+.flow-menu-list {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 132px;
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--flow-panel); border: 1px solid var(--flow-line); border-radius: 8px;
+  padding: 4px; box-shadow: 0 6px 18px rgba(0, 0, 0, .14);
+}
+.flow-menu-up .flow-menu-list { top: auto; bottom: calc(100% + 4px); }
+.flow-menu-item {
+  text-align: left; background: transparent; border: 0; border-radius: 6px;
+  padding: 5px 9px; font: inherit; font-size: 12.5px; color: var(--flow-ink); cursor: pointer;
+}
+.flow-menu-item:hover:not(:disabled) { background: var(--flow-hover); }
+.flow-menu-item:disabled { opacity: .55; cursor: progress; }
+.flow-act-primary { color: var(--flow-accent); font-weight: 600; }
+.flow-act-danger { color: var(--flow-bad); }
+.flow-act-warn { color: var(--flow-warn); }
+
+/* expanded facts: progress facts only, never receipts or specs */
+.flow-row-facts { grid-area: facts; padding-top: 5px; border-top: 1px dashed var(--flow-line); }
+.flow-fact { margin: 2px 0; font-size: 12px; color: var(--flow-muted); }
+.flow-open-task { margin-top: 6px; }
+.flow-empty {
+  border: 1px dashed var(--flow-line); border-radius: 9px;
+  padding: 22px 16px; color: var(--flow-muted); text-align: center; background: var(--flow-panel);
+}
+.flow-error-panel { border-style: solid; border-color: var(--flow-bad); text-align: left; padding: 16px; }
+.flow-error-title { color: var(--flow-bad); font-size: 14px; font-weight: 650; margin-bottom: 5px; }
+.flow-line { margin: 3px 0; font-size: 12px; color: var(--flow-muted); overflow-wrap: anywhere; }
+.flow-retry { margin-top: 9px; border-color: var(--flow-bad); }
+
+/* -- motion: only a genuinely active stage moves ----------------------------- *
+ * claimed = a halo breathing on the current node; a confirmed started review = the same halo plus a light band
+ * sweeping along the incoming connector. A state change flashes once. Nothing else moves, and the reduced-motion
+ * block below disables every animation including the pseudo-element ones. */
+@keyframes flow-halo {
+  0% { transform: scale(.45); opacity: .85; }
+  80%, 100% { transform: scale(1.45); opacity: 0; }
+}
+@keyframes flow-sweep { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+@keyframes flow-particle { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
+@keyframes flow-flash {
+  0% { background-color: var(--flow-accent-soft); }
+  100% { background-color: transparent; }
+}
+.flow-motion-work, .flow-motion-review { border-left-color: var(--flow-accent); }
+.flow-motion .flow-node-active .flow-dot { box-shadow: 0 0 10px color-mix(in srgb, var(--flow-accent) 65%, transparent); }
+.flow-motion .flow-node-active .flow-dot::before,
+.flow-motion .flow-node-active .flow-dot::after {
+  content: ""; position: absolute; inset: -7px; border: 1px solid var(--flow-accent); border-radius: 50%;
+  animation: flow-halo 2.4s ease-out infinite; pointer-events: none;
+}
+.flow-motion .flow-node-active .flow-dot::after { animation-delay: -1.2s; }
+.flow-motion-review .flow-node-active::before,
+.flow-motion-work .flow-node-active::before {
+  background-image: linear-gradient(90deg, var(--flow-accent-soft) 15%, var(--flow-accent) 45%, var(--flow-accent-soft) 75%);
+  background-size: 200% 100%; animation: flow-sweep 2.4s linear infinite;
+}
+.flow-motion-review .flow-node-active::after,
+.flow-motion-work .flow-node-active::after {
+  content: ""; position: absolute; left: -50%; top: 0; width: 100%; height: 10px; pointer-events: none;
+  background: radial-gradient(circle, #fff 0 1px, var(--flow-accent) 2px, transparent 4px) no-repeat;
+  background-size: 10px 10px; filter: drop-shadow(0 0 3px var(--flow-accent));
+  animation: flow-particle 1.8s ease-in-out infinite;
+}
+.flow-task.flow-changed { animation: flow-flash 1.2s ease-out 1; }
+
+/* Status signatures: motion on the badge describes waiting, pausing or an outcome;
+ * it never moves a task to another stage. Only the work/review rules above move light along a connector. */
+.flow-state-symbol { display: inline-block; width: 11px; text-align: center; flex: none; line-height: 1; transform-origin: center; }
+@keyframes flow-ready { 0%, 70%, 100% { transform: translate(0, 0); opacity: .65; } 35% { transform: translate(2px, -2px); opacity: 1; } }
+@keyframes flow-tick { to { transform: rotate(360deg); } }
+@keyframes flow-wait { 0%, 100% { opacity: .4; } 50% { opacity: 1; } }
+@keyframes flow-alert { 0%, 40%, 100% { transform: scale(1); opacity: .75; } 12%, 26% { transform: scale(1.25); opacity: 1; } }
+@keyframes flow-return { 0%, 65%, 100% { transform: rotate(0); } 32% { transform: rotate(-65deg); } }
+@keyframes flow-success { 0%, 75%, 100% { transform: scale(1); } 35% { transform: scale(1.25); filter: drop-shadow(0 0 3px var(--flow-ok)); } }
+@keyframes flow-recall { 0%, 100% { transform: scale(.85); } 50% { transform: scale(1.2); } }
+@keyframes flow-badge-breathe { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 50% { box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 12%, transparent); } }
+.flow-effect-dispatch .flow-state-symbol { animation: flow-ready 2.4s ease-in-out infinite; }
+.flow-effect-work .flow-state-symbol { animation: flow-ready 1.2s ease-in-out infinite; }
+.flow-effect-review .flow-state-symbol { animation: flow-tick 5s linear infinite; }
+.flow-effect-review .flow-node-active .flow-dot::before { animation-duration: 1.8s; border-style: dashed; }
+.flow-effect-review .flow-node-active .flow-dot::after { animation-duration: 1.8s; animation-delay: -.9s; }
+.flow-effect-queued .flow-state-symbol { animation: flow-wait 1.6s ease-in-out infinite; }
+.flow-effect-signoff .flow-state-symbol { animation: flow-tick 12s steps(12) infinite; }
+.flow-effect-signoff .flow-badge { color: var(--flow-accent); animation: flow-badge-breathe 4s ease-in-out infinite; }
+.flow-effect-overdue .flow-badge { color: var(--flow-warn); border-color: var(--flow-warn); animation: flow-badge-breathe 3s ease-in-out infinite; }
+.flow-effect-overdue .flow-state-symbol { animation: flow-alert 3s ease-in-out infinite; }
+.flow-effect-paused .flow-state-symbol { animation: flow-wait 4s ease-in-out infinite; }
+.flow-effect-paused .flow-badge { animation: flow-badge-breathe 5s ease-in-out infinite; }
+.flow-effect-recalling .flow-state-symbol { animation: flow-recall 2s ease-in-out infinite; }
+.flow-effect-recalling .flow-badge { border-style: dashed; animation: flow-badge-breathe 2.5s ease-in-out infinite; }
+.flow-effect-blocked .flow-badge, .flow-effect-stalled .flow-badge { color: var(--flow-bad); border-color: var(--flow-bad); }
+.flow-effect-blocked .flow-state-symbol, .flow-effect-stalled .flow-state-symbol { opacity: .9; }
+.flow-effect-stalled .flow-badge { border-style: dashed; }
+.flow-effect-rework .flow-state-symbol { animation: flow-return 2.6s ease-in-out infinite; }
+.flow-effect-accepted .flow-state-symbol { animation: flow-success 4s ease-in-out infinite; }
+.flow-effect-accepted .flow-badge { color: var(--flow-ok); border-color: var(--flow-ok); }
+.flow-effect-cancelled .flow-state-symbol { animation: flow-wait 6s ease-in-out infinite; }
+.flow-effect-unknown .flow-state-symbol { animation: flow-wait 5s ease-in-out infinite; }
+@keyframes flow-status-ring { 0% { transform: scale(.7); opacity: .8; } 100% { transform: scale(1.6); opacity: 0; } }
+@keyframes flow-stop-glow { 0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 10%, transparent); } 50% { box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 20%, transparent); } }
+.flow-effect-dispatch .flow-node-active .flow-dot::after,
+.flow-effect-queued .flow-node-active .flow-dot::after,
+.flow-effect-signoff .flow-node-active .flow-dot::after,
+.flow-effect-overdue .flow-node-active .flow-dot::after,
+.flow-effect-rework .flow-node-error .flow-dot::after,
+.flow-effect-recalling .flow-node-recalling .flow-dot::after,
+.flow-effect-accepted .flow-node:last-child .flow-dot::after {
+  content: ""; position: absolute; inset: -5px; border: 1px solid currentColor; border-radius: 50%; pointer-events: none;
+}
+.flow-effect-dispatch .flow-dot { color: var(--flow-accent); }
+.flow-effect-dispatch .flow-node-active .flow-dot::after { animation: flow-status-ring 3s ease-out infinite; }
+.flow-effect-queued .flow-node-active .flow-dot { color: var(--flow-warn); background: var(--flow-panel); border-color: var(--flow-warn); }
+.flow-effect-queued .flow-node-active .flow-dot::after { border-style: dashed; animation: flow-tick 8s linear infinite; }
+.flow-effect-signoff .flow-node-active .flow-dot { color: var(--flow-accent); }
+.flow-effect-signoff .flow-node-active .flow-dot::after { border-style: dotted; animation: flow-tick 12s steps(12) infinite; }
+.flow-effect-overdue .flow-node-active .flow-dot { color: var(--flow-warn); background: var(--flow-warn); border-color: var(--flow-warn); }
+.flow-effect-overdue .flow-node-active .flow-dot::after { animation: flow-status-ring 2.5s ease-out infinite; }
+.flow-effect-paused .flow-node-paused .flow-dot { color: var(--flow-warn); animation: flow-stop-glow 5s ease-in-out infinite; }
+.flow-effect-recalling .flow-node-recalling .flow-dot { color: var(--flow-warn); }
+.flow-effect-recalling .flow-node-recalling .flow-dot::after { border-style: dashed; animation: flow-tick 6s linear reverse infinite; }
+.flow-effect-blocked .flow-node-error .flow-dot,
+.flow-effect-stalled .flow-node-active .flow-dot {
+  color: var(--flow-bad); background: var(--flow-bad); border-color: var(--flow-bad);
+  animation: flow-error-breathe 4.8s ease-in-out infinite;
+}
+@keyframes flow-error-breathe {
+  0%, 100% { box-shadow: 0 0 7px color-mix(in srgb, var(--flow-bad) 20%, transparent); }
+  50% { box-shadow: 0 0 15px color-mix(in srgb, var(--flow-bad) 45%, transparent); }
+}
+.flow-effect-blocked .flow-node-error .flow-dot::before,
+.flow-effect-blocked .flow-node-error .flow-dot::after,
+.flow-effect-stalled .flow-node-active .flow-dot::before,
+.flow-effect-stalled .flow-node-active .flow-dot::after {
+  content: ""; position: absolute; inset: -6px; border: 1px solid transparent; border-radius: 50%; pointer-events: none;
+  border-top-color: var(--flow-bad); border-right-color: color-mix(in srgb, var(--flow-bad) 40%, transparent);
+  animation: flow-tick 3.6s linear infinite;
+}
+.flow-effect-blocked .flow-node-error .flow-dot::after,
+.flow-effect-stalled .flow-node-active .flow-dot::after {
+  inset: -10px; opacity: .45; animation: flow-tick 7.2s linear reverse infinite;
+}
+.flow-effect-stalled .flow-node-active .flow-dot::before { animation-duration: 6s; }
+.flow-effect-stalled .flow-node-active .flow-dot::after { animation-duration: 12s; }
+.flow-effect-blocked .flow-badge, .flow-effect-stalled .flow-badge {
+  background: color-mix(in srgb, var(--flow-bad) 5%, var(--flow-panel));
+}
+.flow-effect-rework .flow-node-error .flow-dot { color: var(--flow-warn); }
+.flow-effect-rework .flow-node-error .flow-dot::after { border-style: dashed; animation: flow-return 2.6s ease-in-out infinite; }
+.flow-effect-accepted .flow-node:last-child .flow-dot { color: var(--flow-ok); background: var(--flow-ok); border-color: var(--flow-ok); }
+.flow-effect-accepted .flow-node:last-child .flow-dot::after { animation: flow-status-ring 4s ease-out infinite; }
+.flow-effect-cancelled .flow-node-error .flow-dot { background: var(--flow-muted); border-color: var(--flow-muted); animation: flow-wait 6s ease-in-out infinite; }
+.flow-effect-cancelled .flow-node-error .flow-node-label { color: var(--flow-muted); }
+
+/* Contract: focus visibility and a hard stop for motion (pseudo-elements included). */
+.flow-container :focus-visible { outline: 2px solid var(--flow-accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  .flow-container *,
+  .flow-container *::before,
+  .flow-container *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* -- responsive: 1024 / 1440 / 1920 keep one row; 430 wraps to two ------- */
+@media (max-width: 1280px) {
+  .flow-task { grid-template-columns: minmax(150px, 1.2fr) minmax(300px, 2.6fr) 120px 52px; column-gap: 10px; }
+  .flow-node-label { font-size: 10.5px; }
+}
+@media (max-width: 900px) {
+  .flow-root { padding: 10px 10px 18px; }
+  .flow-title { font-size: 15px; }
+  .flow-task {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "main status acts" "chain chain chain";
+    row-gap: 4px; min-height: 0; padding: 7px 9px;
+  }
+  .flow-task.flow-open { grid-template-areas: "main status acts" "chain chain chain" "facts facts facts"; }
+  .flow-node-label { font-size: 10px; }
+  .flow-search { min-width: 120px; flex: 1 1 120px; }
+  .flow-stats { gap: 4px; }
+  .flow-chip { padding: 1px 7px; }
+}
+@media (max-width: 560px) {
+  .flow-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; }
+  .flow-chain { overflow-x: auto; scrollbar-width: thin; }
+  .flow-node { flex: 1 1 0; }
+  .flow-node-label { font-size: 9px; max-width: 100%; }
+  .flow-select { max-width: none; flex: 1 1 100%; }
+  .flow-legend { font-size: 10.5px; }
+}

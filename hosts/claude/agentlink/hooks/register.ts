@@ -45,12 +45,25 @@ export const register: Register = on => {
             timeoutMs: 20000,
           })
           if (ran.exitCode !== 0) return
-          const pending = JSON.parse(ran.stdout) as { ids?: string[]; wake?: boolean }
+          const pending = JSON.parse(ran.stdout) as { ids?: string[]; wake?: boolean; lease?: string | null }
           if (!pending.wake || !pending.ids?.length) return
-          await $.prompt.submit({
-            // Fixed text and task IDs only; the details arrive inline through the prompt.submit hook below.
-            text: `AgentLink：${pending.ids.join('、')} 需要你处理。详情已附在本轮上下文，无需再 list / show；处理完只回一行。`,
-          })
+          // The poll reserved this wake. If the prompt cannot be submitted the reservation must be released as
+          // failed, otherwise that batch would be blocked until the lease expires.
+          let submitted = false
+          try {
+            await $.prompt.submit({
+              // Fixed text and task IDs only; the details arrive inline through the prompt.submit hook below.
+              text: `AgentLink：${pending.ids.join('、')} 需要你处理。详情已附在本轮上下文，无需再 list / show；处理完只回一行。`,
+            })
+            submitted = true
+          } finally {
+            if (pending.lease) {
+              await $.process.run(
+                [...call.argv, 'ack-wake', '--lease', pending.lease, ...(submitted ? [] : ['--failed'])],
+                { timeoutMs: 20000 },
+              ).catch(() => undefined)
+            }
+          }
         } catch {
           // A failed poll is retried on the next tick; it must never surface in the session.
         } finally {
